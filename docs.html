@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Explore the Prime archive, save verified ranges, and find the project on GitHub.">
+  <title>Documentation | Prime</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="./"><span aria-hidden="true">2</span> Prime</a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <a href="./">Dashboard</a>
+      <a href="research.html">Research</a>
+      <a href="docs.html" aria-current="page">Documentation</a>
+    </nav>
+  </header>
+  <main class="guide">
+    <header class="intro">
+      <h1>Documentation</h1>
+      <p>Explore verified primes, save a reproducible snapshot, and find the project source.</p>
+    </header>
+
+    <section aria-labelledby="archive">
+      <h2 id="archive">Explore the archive</h2>
+      <p>Use <a href="./#archive-title">Explore the archive</a> on the dashboard to enter an inclusive interval and see prime counts, checked coverage, and archived primes. You can browse the archive without enrolling a worker.</p>
+      <p>Run <code>prime ui</code> to open the archive dashboard at the local address printed in your terminal. It reads live data from Atlas. To use the dev archive, run <code>prime --server https://prime-dev-api.notallow.cc ui</code>. With Prime v0.2.0, use this website for the researcher guide and documentation.</p>
+    </section>
+
+    <section aria-labelledby="save">
+      <h2 id="save">Save a range locally</h2>
+      <p>These requests save the verified primes and coverage summary for integers 2 through 100. They use the public production archive. For dev data, set <code>api</code> to <code>https://prime-dev-api.notallow.cc</code>.</p>
+      <pre><code>api=https://prime-api.notallow.cc
+curl -fsS "$api/api/v1/mining/progress" -o prime-progress.json</code></pre>
+      <p>Read <code>revision</code> from <code>prime-progress.json</code>, substitute that value below, and run both requests against that revision.</p>
+      <pre><code>revision=PASTE_REVISION_HERE
+curl -fsS "$api/api/v1/primes?lo=2&amp;hi=100&amp;limit=100&amp;revision=$revision" -o prime-2-100.json
+curl -fsS "$api/api/v1/summary?lo=2&amp;hi=100&amp;buckets=1&amp;revision=$revision" -o coverage-2-100.json</code></pre>
+      <p>Keep the JSON files with the API origin, inclusive bounds, and revision in your research notes. In this example, <code>covered</code> is <code>"99"</code> and <code>count</code> is <code>"25"</code>. The API uses decimal strings for large integers and counts. Use arbitrary-precision integer types when processing them.</p>
+    </section>
+
+    <section aria-labelledby="sync">
+      <h2 id="sync">Page through results and sync updates</h2>
+      <ul>
+        <li>For more primes in the same range, pass <code>next_after</code> as <code>after</code> on the next request. Keep the bounds and revision fixed until <code>next_after</code> is <code>null</code>.</li>
+        <li>For more summary results, pass <code>next_cursor</code> as <code>cursor</code> and keep the bounds, bucket count, and revision fixed until <code>next_cursor</code> is <code>null</code>. Add <code>covered</code> and <code>count</code> per bucket across pages. Confirm that covered integers add up to the interval length before treating the range as complete.</li>
+        <li>To sync a local copy of the contiguous archive later, fetch fresh progress from the same API origin. Read the new <code>verified_through</code> and <code>revision</code>. If the frontier has advanced, fetch from your last fully saved frontier plus one through the new frontier at the new revision. Save those pages alongside your previous files.</li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="source">
+      <h2 id="source">Project source and support</h2>
+      <p>The public repository contains the Rust worker and coordinator, the dashboard, and the Atlas deployment configuration.</p>
+      <ul>
+        <li><a href="https://github.com/VachaganGrigoryan/prime">Prime source on GitHub</a></li>
+        <li><a href="https://github.com/VachaganGrigoryan/prime/blob/blackway/README.md">Project README and build commands</a></li>
+        <li><a href="https://github.com/VachaganGrigoryan/prime/blob/blackway/WORKER.md">Worker and release guide</a></li>
+        <li><a href="https://github.com/VachaganGrigoryan/prime/releases">Releases and checksums</a></li>
+        <li><a href="https://github.com/VachaganGrigoryan/prime/issues">Report an issue</a></li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

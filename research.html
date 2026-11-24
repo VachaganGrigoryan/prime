@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Run a Prime worker and help check the next blocks of integers for primes.">
+  <title>Become a researcher | Prime</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="./"><span aria-hidden="true">2</span> Prime</a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <a href="./">Dashboard</a>
+      <a href="research.html" aria-current="page">Research</a>
+      <a href="docs.html">Documentation</a>
+    </nav>
+  </header>
+  <main class="guide">
+    <header class="intro">
+      <h1>Become a researcher</h1>
+      <p>Run a Prime worker to help check the next blocks of integers and extend the public archive of verified primes.</p>
+    </header>
+
+    <section aria-labelledby="install">
+      <h2 id="install">Install Prime</h2>
+      <h3>macOS</h3>
+      <p>Install with Homebrew on Apple Silicon or Intel, then start the worker.</p>
+      <pre><code>brew install VachaganGrigoryan/tap/prime
+prime worker</code></pre>
+
+      <h3>Linux and Windows</h3>
+      <p>With Git, Rustup, and a native build toolchain installed, build the portable worker from the release source.</p>
+      <pre><code>git clone --branch v0.2.0 --depth 1 https://github.com/VachaganGrigoryan/prime.git
+cd prime
+rustup toolchain install 1.99.1
+cargo +1.99.1 build --locked --release --no-default-features --features volunteer-worker --bin prime</code></pre>
+      <p>Run <code>./target/release/prime worker</code> on Linux or <code>.\target\release\prime.exe worker</code> in Windows PowerShell. Find the source archive and checksums on the <a href="https://github.com/VachaganGrigoryan/prime/releases">releases page</a>.</p>
+    </section>
+
+    <section aria-labelledby="enroll">
+      <h2 id="enroll">Enroll your device</h2>
+      <ol>
+        <li>Open the enrollment link printed by the worker and complete the browser challenge. Paste the one-time code into the terminal.</li>
+        <li>The worker saves a credential for that API origin and runs a benchmark. Wait for an Atlas operator to review the benchmark and approve the device.</li>
+        <li>Leave the worker running or rerun it later. Once approved, it requests blocks whenever Atlas is dispatching work.</li>
+      </ol>
+      <p>Press <kbd>Ctrl+C</kbd> to stop. Run the same command again to resume with the saved credential.</p>
+      <h3>Try the dev environment</h3>
+      <p>Run the installed CLI with the dev API address and complete a separate enrollment there.</p>
+      <pre><code>prime --server https://prime-dev-api.notallow.cc worker</code></pre>
+    </section>
+
+    <section aria-labelledby="process">
+      <h2 id="process">How the search works</h2>
+      <ol>
+        <li><strong>Assignment.</strong> Atlas leases an unchecked block, a consecutive range of integers, to an approved worker. An unfinished block can be reassigned after its lease expires.</li>
+        <li><strong>Computation.</strong> The worker checks the range for primes, renews its lease while computing, and submits the result to Atlas.</li>
+        <li><strong>Verification.</strong> Atlas verifies the result before committing the block to the archive. The frontier advances when every integer from 2 through the new boundary is covered.</li>
+      </ol>
+      <p><a href="./">Follow search progress</a> or learn how to <a href="docs.html#archive">query and keep archive data</a>.</p>
+    </section>
+  </main>
+</body>
+</html>
