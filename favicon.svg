@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>Prime</title>
+  <rect width="64" height="64" rx="13" fill="#f9cd78"/>
+  <g fill="#201c16">
+    <path fill-rule="evenodd" d="M13 51V17h15a12 12 0 0 1 0 24h-7v10zm8-18h7a4 4 0 0 0 0-8h-7z"/>
+    <path d="M46 11h9l-7 16h-7z"/>
+  </g>
+</svg>

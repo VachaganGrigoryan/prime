@@ -34,13 +34,6 @@ p, dt, label, details { color: var(--subtle); }
   letter-spacing: -.025em;
   text-decoration: none;
 }
-.brand span {
-  background: var(--accent);
-  border-radius: .35rem;
-  color: #1a1814;
-  font: 700 .92rem/1 var(--mono);
-  padding: .42rem .52rem;
-}
 .site-nav { display: flex; flex-wrap: wrap; gap: .35rem 1rem; }
 .site-nav a { color: var(--subtle); font-size: .9rem; text-underline-offset: .3em; }
 .site-nav a:hover, .site-nav a[aria-current] { color: var(--accent); }
