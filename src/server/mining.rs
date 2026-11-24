@@ -168,6 +168,9 @@ async fn private_response(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     response
         .headers_mut()
+        .insert("x-robots-tag", HeaderValue::from_static("noindex"));
+    response
+        .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response.headers_mut().insert(
         header::REFERRER_POLICY,
@@ -585,7 +588,7 @@ pub(super) fn operator_router(app: App, access: Access) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ready" }))
         .merge(
-            Router::new()
+            prime_finder::client_assets::icon_router()
                 .route("/", get(admin_page))
                 .route("/devices/{id}", get(admin_device_page))
                 .route(
@@ -797,6 +800,13 @@ mod tests {
                 "/prime-experiment.json",
                 "/prime-prediction.json",
                 "/prime-score.json",
+                "/favicon.ico",
+                "/favicon-96.png",
+                "/favicon.svg",
+                "/apple-touch-icon.png",
+                "/social-card.png",
+                "/robots.txt",
+                "/sitemap.xml",
             ] {
                 let (status, _) = call(&router, "GET", path, "", Value::Null).await;
                 assert_eq!(status, static_status, "{path}");

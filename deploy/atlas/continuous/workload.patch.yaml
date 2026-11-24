@@ -10,7 +10,7 @@ spec:
     spec:
       containers:
         - name: coordinator
-          image: prime:0.2.0-resources-20261124-2
+          image: prime:0.2.0-brand-20261124-1
           args:
             - serve
             - --bind

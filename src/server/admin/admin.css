@@ -31,7 +31,6 @@ a { color: var(--accent); text-underline-offset: .2em; }
 .topbar { border-bottom: 1px solid var(--line); background: #181a1c; }
 .topbar-inner { min-height: 4rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .brand { display: flex; align-items: center; gap: .625rem; color: inherit; text-decoration: none; font-size: 1.08rem; font-weight: 720; }
-.brand-mark { border-radius: .35rem; background: var(--accent); color: #201a10; padding: .45rem .55rem; font: 700 .9rem/1 var(--mono); }
 .brand-context { color: var(--muted); font-weight: 500; margin-left: .2rem; }
 .public-link { color: var(--muted); font-size: .875rem; text-decoration: none; text-align: right; }
 .public-link:hover, .public-link:focus-visible { color: var(--accent); text-decoration: underline; }
