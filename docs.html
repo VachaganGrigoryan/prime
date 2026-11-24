@@ -13,6 +13,7 @@
     <a class="brand" href="./"><span aria-hidden="true">2</span> Prime</a>
     <nav class="site-nav" aria-label="Main navigation">
       <a href="./">Dashboard</a>
+      <a href="estimates.html">Estimates</a>
       <a href="research.html">Research</a>
       <a href="docs.html" aria-current="page">Documentation</a>
     </nav>
@@ -27,6 +28,14 @@
       <h2 id="archive">Explore the archive</h2>
       <p>Use <a href="./#archive-title">Explore the archive</a> on the dashboard to enter an inclusive interval and see prime counts, checked coverage, and archived primes. You can browse the archive without enrolling a worker.</p>
       <p>Run <code>prime ui</code> to open the archive dashboard at the local address printed in your terminal. It reads live data from Atlas. To use the dev archive, run <code>prime --server https://prime-dev-api.notallow.cc ui</code>. With Prime v0.2.0, use this website for the researcher guide and documentation.</p>
+    </section>
+
+    <section aria-labelledby="models">
+      <h2 id="models">Replay the estimates</h2>
+      <p>The <a href="estimates.html">Estimates page</a> lets you compare archive counts with five formulas, inspect errors by window width, and download the observations behind each chart. Each dataset identifies its archive revision, model version and zero table.</p>
+      <p>For an inclusive window [a, b], the count estimate is F(b) − F(a − 1). The weighted observation adds ln(p) for every prime power pᵏ in the window. The model evaluates the zeta explicit formula at b + ½ and a − ½. Sampling between integers avoids the midpoint convention at a prime power.</p>
+      <p>The numerical implementation uses 50 decimal digits and the first 64 conjugate zero pairs from <a href="https://www.lmfdb.org/zeros/zeta/Source">David Platt’s verified LMFDB table</a>. The heatmap compares mean absolute errors over the fully observed windows at each width. Click a cell to see the individual measurements. The <a href="https://github.com/VachaganGrigoryan/prime/blob/blackway/scripts/prime_models.py">model implementation</a> gives the formulas and pinned zero-table checksum.</p>
+      <p>Download the prediction manifest and its score to retain a forecast. The <a href="https://github.com/VachaganGrigoryan/prime#prime-estimates">replay instructions</a> explain how to reproduce the score at a specific revision. Open the resulting JSON on the Estimates page to inspect each window.</p>
     </section>
 
     <section aria-labelledby="save">

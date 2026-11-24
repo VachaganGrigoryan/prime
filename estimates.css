@@ -1,0 +1,47 @@
+.estimates { --high: #8bdcca; --low: #edab9f; }
+.estimates a { color: var(--accent); text-underline-offset: .2em; }
+.estimates section, .methods { border-top: 1px solid var(--line); margin-top: 2rem; padding-top: 1.6rem; }
+.estimates h2 { font-size: clamp(1.35rem, 2.8vw, 1.8rem); margin-bottom: .25rem; }
+.estimates h3 { margin: 0; font-size: 1.15rem; }
+.estimates .intro p, .estimates section > p, .methods p { max-width: 48rem; }
+.snapshot { align-items: center; display: flex; flex-wrap: wrap; gap: 1rem 3rem; }
+.snapshot div span, .snapshot strong { display: block; }
+.snapshot div span { font-size: .82rem; color: var(--subtle); }
+.snapshot strong { font: 600 clamp(1.1rem, 2.5vw, 1.7rem)/1.4 var(--mono); color: var(--accent); }
+.snapshot a { margin-left: auto; }
+.controls { display: flex; flex-wrap: wrap; gap: .7rem; margin: 1rem 0; }
+.controls label { flex: 0 1 auto; }
+.estimates select { background: var(--panel); color: inherit; display: block; border: 1px solid #626364; border-radius: .35rem; font: inherit; padding: .55rem; max-width: 100%; }
+.plot-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1rem; }
+.plot-grid .panel > p, .evidence > p, .plot-note { font-size: .84rem; }
+.model { padding: .48rem 0; border-top: 1px solid var(--line); }
+.model:first-child { margin-top: .65rem; }
+.model-label, .model-data { display: flex; align-items: baseline; justify-content: space-between; gap: .45rem; }
+.model-label { font-size: .85rem; }
+.model-label strong, .model-data { font-family: var(--mono); }
+.model-data { color: var(--subtle); font-size: .75rem; }
+.axis { height: .7rem; position: relative; margin: .12rem 0; border-radius: .12rem; background: linear-gradient(to right, transparent 49.8%, #797c7e 49.8%, #797c7e 50.2%, transparent 50.2%); }
+.bar { position: absolute; top: .12rem; height: .46rem; border-radius: 1px; }
+.under { background: var(--high); } .over { background: var(--low); }
+.plot-note { margin: .6rem 0; }
+.scroll { overflow-x: auto; }
+.estimates table { border-collapse: collapse; width: 100%; font-size: .84rem; font-variant-numeric: tabular-nums; }
+.estimates caption { text-align: left; color: var(--subtle); margin: .5rem 0; }
+.estimates td, .estimates th { text-align: right; padding: .46rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.estimates tr > :first-child { text-align: left; }
+.estimates th { color: var(--subtle); font-weight: 550; }
+.heat-cell { width: 100%; min-width: 4.5rem; background: var(--panel); color: #f3f1eb; border-color: #656664; }
+.heat-cell[aria-pressed=true] { outline: 2px solid var(--accent); outline-offset: -2px; }
+.heat-cell[data-tone=up] { background: color-mix(in srgb, #175b51 var(--strength), var(--panel)); }
+.heat-cell[data-tone=down] { background: color-mix(in srgb, #8b4238 var(--strength), var(--panel)); }
+.evidence { margin-top: 1rem; }
+.evidence td { font-family: var(--mono); }
+.pages { display: flex; align-items: center; gap: .6rem; margin-top: .7rem; font-size: .8rem; }
+.pages button { background: transparent; color: var(--accent); min-height: 2.2rem; }
+.pages button:disabled { cursor: default; }
+.file-label { display: block; margin-top: .9rem; max-width: 30rem; }
+#manifest-status, #score-status, .methods p { margin: .7rem 0; }
+#score-status, #provenance { overflow-wrap: anywhere; }
+@media (max-width: 770px) { .plot-grid { grid-template-columns: 1fr; } .snapshot a { margin-left: 0; } }
+.phase-groups { margin-top: 1rem; }
+.phase-groups p { margin-top: .65rem; }

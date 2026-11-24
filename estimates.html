@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Prime estimates | Prime</title>
+  <link rel="stylesheet" href="style.css?v=research-1">
+  <link rel="stylesheet" href="estimates.css">
+  <script src="estimates.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="./"><span aria-hidden="true">2</span> Prime</a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <a href="./">Dashboard</a><a href="estimates.html" aria-current="page">Estimates</a>
+      <a href="research.html">Research</a><a href="docs.html">Documentation</a>
+    </nav>
+  </header>
+  <main class="estimates">
+    <header class="intro"><h1>Prime estimates</h1>
+      <p>How accurately do formulas count primes? Compare their errors across the verified archive, from the full count down to a single mining block.</p>
+    </header>
+    <p id="load-status" role="status">Loading the archive snapshot…</p>
+    <noscript><p>Enable JavaScript to explore the charts or <a href="prime-experiment.json">download the measurements</a>.</p></noscript>
+    <div id="experiment" hidden>
+      <div class="snapshot">
+        <div><span>Verified through</span><strong id="frontier"></strong></div>
+        <div><span>Primes counted</span><strong id="total"></strong></div>
+        <div><span>Archive revision</span><strong id="revision"></strong></div>
+        <a href="prime-experiment.json" download>Download data <span aria-hidden="true">↓</span></a>
+      </div>
+      <section class="comparison" aria-labelledby="comparison-title">
+        <h2 id="comparison-title">Observed and estimated counts</h2>
+        <p>Choose a span from the final eight verified blocks. Positive error means the formula underestimated the count.</p>
+        <div class="controls">
+          <label>From block<select id="from-block"></select></label>
+          <label>Through block<select id="to-block"></select></label>
+        </div>
+        <div class="plot-grid" aria-live="polite">
+          <article class="panel"><h3>Cumulative count</h3><p id="cumulative-caption"></p><div id="cumulative"></div></article>
+          <article class="panel"><h3>Selected interval</h3><p id="interval-caption"></p><div id="interval"></div></article>
+        </div>
+        <p class="plot-note">Bars show actual minus estimated primes on a signed logarithmic scale. Each panel scales to its largest error.</p>
+        <a id="interval-source">View interval in Atlas ↗</a>
+      </section>
+      <section aria-labelledby="heat-title">
+        <h2 id="heat-title">Where do the zeros help?</h2>
+        <p>Choose a location and window width to inspect the change in mean absolute error. Positive values mean the selected model improved on the smooth baseline.</p>
+        <div class="controls">
+          <label>Quantity<select id="quantity"><option value="count">Prime count</option><option value="psi">Weighted prime powers (ψ)</option></select></label>
+          <label>Zero pairs<select id="zeros"><option>0</option><option>16</option><option selected>64</option></select></label>
+        </div>
+        <div class="scroll"><table id="heat"><caption id="heat-caption"></caption></table></div>
+        <div class="panel evidence" aria-live="polite">
+          <h3 id="cell-title"></h3><p id="cell-summary"></p>
+          <div class="scroll"><table><caption id="rows-caption">Window measurements</caption><thead><tr>
+            <th scope="col">Inclusive interval</th><th scope="col">Observed</th><th scope="col">Smooth estimate</th><th scope="col">Zero model</th><th scope="col">Phase advance (rad)</th>
+          </tr></thead><tbody id="windows"></tbody></table></div>
+          <div class="pages"><button type="button" id="prev">Previous</button><span id="page-status"></span><button type="button" id="next">Next</button></div>
+        </div>
+        <details class="phase-groups">
+          <summary>Compare windows by phase advance</summary>
+          <p id="phase-summary"></p>
+          <div class="scroll"><table><caption>Mean error reduction within each phase band</caption><thead id="phase-head"></thead><tbody id="phase-body"></tbody></table></div>
+        </details>
+      </section>
+    </div>
+    <section id="forecast" aria-labelledby="forecast-title">
+      <h2 id="forecast-title">Predictions and replay</h2>
+      <p>The manifest fixes the model, zeros, and boundaries before scoring. Compare its timestamp and archive revision with the eventual score.</p>
+      <p id="manifest-status" role="status">Loading the prediction manifest…</p>
+      <a id="manifest-link" hidden href="prime-prediction.json" download>Download prediction manifest ↓</a>
+      <label class="file-label">Open a score JSON from the replay command<input type="file" id="score-file" disabled accept=".json,application/json"></label>
+      <div class="controls" id="score-controls" hidden>
+        <label>Score quantity<select id="score-quantity"><option value="count">Prime count</option><option value="psi">Weighted prime powers (ψ)</option></select></label>
+        <label>Score zero pairs<select id="score-zeros"><option>0</option><option>16</option><option selected>64</option></select></label>
+        <button type="button" class="secondary" id="site-score" hidden>Return to site score</button>
+      </div>
+      <div id="score-status" role="status"></div>
+    </section>
+    <details class="methods">
+      <summary>Methods and data provenance</summary>
+      <p>π(x) counts primes through x. The logarithmic integral li and Riemann’s smooth R function approximate that count. Each window uses the difference of cumulative estimates at its integer boundaries.</p>
+      <p>ψ adds log(p) for every prime power pᵏ in the interval, including primes themselves. The zero model reconstructs ψ at half-integers and feeds it to R for a prime-count estimate. For prime counts the smooth baseline is R; for ψ it is the window width.</p>
+      <p>Phase advance is the change in the highest included zero’s oscillation across a window. Compare cells with similar phase to investigate whether the improvement persists across locations.</p>
+      <p id="provenance"></p>
+      <a href="https://t5k.org/howmany.html">T5K prime counting</a> · <a href="https://arxiv.org/abs/1410.1083">Planat and Solé</a> · <a href="docs.html">Archive documentation</a>
+    </details>
+  </main>
+</body>
+</html>
