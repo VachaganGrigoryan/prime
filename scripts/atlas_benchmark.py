@@ -17,25 +17,41 @@ SCRATCH_ROOT = "/NAS/dev/prime-finder-benchmarks"
 PRIVATE_PORT = 19087
 READ_PORT = 19088
 VOLUNTEER_PORT = 19089
+VOLUNTEER_PATHS = {
+    "/api/v1/contribute/claim",
+    "/api/v1/contribute/evidence/claim",
+    "/api/v1/contribute/evidence/heartbeat",
+    "/api/v1/contribute/evidence/submit",
+}
 
 
 class VolunteerProxy(BaseHTTPRequestHandler):
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", "0"))
-        allowed = (self.path.startswith("/api/v1/contribute/evidence/")
-                   or self.path == "/api/v1/contribute/claim")
-        if not allowed or not 0 <= length <= 3 << 20:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = -1
+        if self.path not in VOLUNTEER_PATHS or not 0 <= length <= 3 << 20:
             self.send_error(400)
             return
+        self.forward("POST", self.rfile.read(length))
+
+    def do_GET(self):
+        if self.path == "/healthz":
+            self.forward("GET", None)
+        else:
+            self.send_error(404)
+
+    def forward(self, method, body):
         upstream = HTTPConnection("127.0.0.1", VOLUNTEER_PORT, timeout=15)
         try:
             headers = {name: self.headers[name] for name in ("Authorization", "Content-Type")
                        if name in self.headers}
-            upstream.request("POST", self.path, self.rfile.read(length), headers)
+            upstream.request(method, self.path, body, headers)
             response = upstream.getresponse()
             payload = response.read()
             self.send_response(response.status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -46,19 +62,38 @@ class VolunteerProxy(BaseHTTPRequestHandler):
         pass
 
 
+class VolunteerServer(ThreadingHTTPServer):
+    def __init__(self, address, context):
+        self.context = context
+        super().__init__(address, VolunteerProxy)
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(15)
+        try:
+            return self.context.wrap_socket(connection, server_side=True,
+                                            do_handshake_on_connect=False), address
+        except BaseException:
+            connection.close()
+            raise
+
+
 @contextmanager
-def volunteer_tls(root):
+def volunteer_tls(root, listen="127.0.0.1", port=0):
     ca, ca_key = root / "atlas-stage-ca.pem", root / "atlas-stage-ca.key"
     certificate, key, request = root / "volunteer.pem", root / "volunteer.key", root / "volunteer.csr"
     extensions = root / "volunteer.ext"
-    extensions.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+    extensions.write_text(f"subjectAltName=DNS:localhost,IP:{listen}\n"
                           "basicConstraints=critical,CA:FALSE\n"
+                          "authorityKeyIdentifier=keyid:always\n"
+                          "subjectKeyIdentifier=hash\n"
                           "keyUsage=critical,digitalSignature,keyEncipherment\n"
                           "extendedKeyUsage=serverAuth\n")
     for command in (
         ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
          "-subj", "/CN=Prime Finder Atlas Benchmark CA", "-addext", "basicConstraints=critical,CA:TRUE",
-         "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-keyout", str(ca_key), "-out", str(ca)],
+         "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-addext", "subjectKeyIdentifier=hash",
+         "-keyout", str(ca_key), "-out", str(ca)],
         ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
          "-keyout", str(key), "-out", str(request)],
         ["x509", "-req", "-in", str(request), "-CA", str(ca), "-CAkey", str(ca_key), "-set_serial", "1",
@@ -67,12 +102,11 @@ def volunteer_tls(root):
         subprocess.run(["openssl", *command], check=True, capture_output=True)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certificate, key)
-    with ThreadingHTTPServer(("127.0.0.1", 0), VolunteerProxy) as server:
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+    with VolunteerServer((listen, port), context) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            yield f"https://127.0.0.1:{server.server_port}", str(ca)
+            yield f"https://{listen}:{server.server_port}", str(ca)
         finally:
             server.shutdown()
             thread.join()

@@ -10,7 +10,7 @@ archive = "prime-worker-#{version}-source.tar.gz"
 preview = channel == "--preview"
 formula = preview ? "PrimeWorkerPreview" : "PrimeWorker"
 tag = preview ? "worker-preview-v#{version}" : "worker-v#{version}"
-conflict = preview ? "\n  conflicts_with \"prime-worker\", because: \"both install the prime-worker executable\"" : ""
+conflict = preview ? "\n  conflicts_with \"vachagangrigoryan/tap/prime-worker\", because: \"both install the prime-worker executable\"" : ""
 digests = File.foreach(checksums).each_with_object([]) do |line, matches|
   digest, name = line.split
   matches << digest if name == archive
