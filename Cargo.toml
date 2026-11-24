@@ -1,17 +1,30 @@
 [package]
-name = "prime-finder"
-version = "0.1.0"
+name = "prime"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/VachaganGrigoryan/prime-finder"
+repository = "https://github.com/VachaganGrigoryan/prime"
 publish = false
-default-run = "prime-finder"
+default-run = "prime-coordinator"
 autobins = false
+
+[lib]
+name = "prime_finder"
 
 [[bin]]
 name = "prime-finder"
 path = "src/main.rs"
 required-features = ["coordinator"]
+
+[[bin]]
+name = "prime-coordinator"
+path = "src/coordinator.rs"
+required-features = ["coordinator"]
+
+[[bin]]
+name = "prime"
+path = "src/bin/prime.rs"
+required-features = ["volunteer-worker"]
 
 [[bin]]
 name = "prime-worker"
@@ -22,9 +35,9 @@ required-features = ["volunteer-worker"]
 default = ["coordinator"]
 coordinator = [
     "dep:axum", "dep:getrandom", "dep:libc", "dep:rusqlite", "dep:tokio-stream",
-    "dep:tower-http", "reqwest/rustls", "reqwest/stream",
+    "dep:tower-http", "dep:ring", "reqwest/rustls", "reqwest/stream",
 ]
-volunteer-worker = ["dep:rpassword", "reqwest/rustls"]
+volunteer-worker = ["dep:axum", "dep:getrandom", "dep:rpassword", "reqwest/rustls"]
 
 [dependencies]
 axum = { version = "=0.8.9", optional = true }
@@ -33,6 +46,7 @@ clap = { version = "=4.6.9", features = ["derive"] }
 getrandom = { version = "=0.4.3", optional = true }
 libc = { version = "=0.2.191", optional = true }
 reqwest = { version = "=0.13.5", default-features = false, features = ["json"] }
+ring = { version = "=0.17.14", optional = true }
 rpassword = { version = "=7.4.0", optional = true }
 rusqlite = { version = "=0.38.0", optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }

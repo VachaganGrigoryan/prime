@@ -1,51 +1,167 @@
-# Prime Finder on Atlas
+# Prime on Atlas
 
-The coordinator runs in `dev-prime-finder` on Atlas. The Northbound API on loopback 8787 handles jobs and trusted workers. The archive API on ClusterIP 8788 supplies the independently deployed Test Math frontend. The coordinator stores its archive under `/NAS/dev/prime-finder/storage` and retains the existing sparse 100 GB filesystem and SQLite WAL with full synchronization.
+Atlas runs the coordinator, archive API, and Admin. Cloudflare Pages serves the
+public dashboard from `src/client_assets`. The production overlay upgrades
+`dev-prime-finder-coordinator` in place, retaining its archive volume, archive
+mount identity, and the read-only ClusterIP port 8788 used by Test Math.
 
-## Build and roll out the coordinator
+| Host | Atlas origin | Access |
+| --- | --- | --- |
+| `prime.notallow.cc` | Cloudflare Pages | Public stats |
+| `prime-api.notallow.cc` | `127.0.0.1:8789` | Public reads, Turnstile enrollment, per-device worker bearer |
+| `prime-admin.notallow.cc` | `127.0.0.1:8792` | Owner-only Cloudflare Access |
+| `prime-dev-api.notallow.cc` | `127.0.0.1:28889` | Isolated staging API and enrollment |
+| `prime-dev-admin.notallow.cc` | `127.0.0.1:28892` | Owner-only staging Access |
 
-Run the Linux image build in the Atlas build workspace. Transfer this repository's `Cargo.toml`, `Cargo.lock`, `src/`, and `deploy/atlas/` to its source directory. Build and import a unique tag using the existing Atlas workflow.
+The loopback ports 8787 (production) and 28887 (staging) are for private
+operator access through SSH. The coordinator checks the Access token issuer,
+audience, signature, and lifetime for browser Admin and checks the configured
+origin on Admin writes. Keep public API responses involving enrollment or
+workers out of edge caches.
+
+## Build and stage
+
+Build a unique image tag in a clean Atlas build workspace and import it into
+k3s. These commands use the release image tag selected in
+`continuous/workload.patch.yaml`. For iterations, use a fresh tag and update
+that patch before rendering staging.
 
 ```sh
-atlas build new prime-finder lab-v1 --mem 3Gi --empty
-atlas build exec prime-finder lab-v1 -- 'cd "$WS/src" && docker build -t prime-finder:lab-v6 -f deploy/atlas/Dockerfile . && docker save -o "$WS/prime-finder-v6.tar" prime-finder:lab-v6'
-atlas ssh 'sudo k3s ctr -n k8s.io images import /build/prime-finder/lab-v1/prime-finder-v6.tar'
+atlas build new prime v020 --mem 3Gi --empty
+atlas ssh 'sudo mkdir -p /build/prime/v020/src'
+tar -cf - Cargo.toml Cargo.lock src deploy/atlas | atlas ssh 'sudo tar -xf - -C /build/prime/v020/src'
+atlas build exec prime v020 -- 'cd "$WS/src" && docker build -t prime:0.2.0 -f deploy/atlas/Dockerfile . && docker save -o "$WS/prime-0.2.0.tar" prime:0.2.0'
+atlas ssh 'sudo k3s ctr -n k8s.io images import /build/prime/v020/prime-0.2.0.tar'
 ```
 
-On a first install, provision the mounted storage with `provision-storage.sh` and create `prime-finder-env` with the usual Atlas env-to-secret workflow. Its keys are `PRIME_ADMIN_TOKEN` and `PRIME_WORKER_TOKEN`. For an existing service use the current volume and secret. Dry-run the matching kustomization, then apply it and check the rollout.
+Create separate HTTPS staging and production Turnstile widgets restricted to
+their API hostnames. Create a separate owner-only Cloudflare Access application
+for each Admin hostname before publishing its tunnel route. Set the following
+values in a mode-0600 env file on Atlas for each environment, using the
+environment’s hostname, widget, and Access application audience. Use
+`https://vachagan.cloudflareaccess.com` for the Atlas Access issuer.
+
+- `PRIME_TURNSTILE_SITE_KEY`, `PRIME_TURNSTILE_SECRET`, and `PRIME_TURNSTILE_HOSTNAME`
+- `PRIME_ADMIN_ORIGIN`, `PRIME_ACCESS_ISSUER`, and `PRIME_ACCESS_AUDIENCE`
+- `PRIME_UI_ORIGIN`, which defaults to `https://prime.notallow.cc`
+
+Use the existing Atlas env-to-secret tool to store each environment’s file as
+`prime-continuous-env` in its namespace. The staging namespace also needs a
+separate `prime-finder-env` with random `PRIME_ADMIN_TOKEN` and
+`PRIME_WORKER_TOKEN`. Reuse the existing `prime-finder-env` only in production.
+Check the staging and production host ports against existing pod `hostPort`
+settings and host processes before applying either overlay.
 
 ```sh
-atlas kube apply --dry-run=server -k deploy/atlas
-atlas kube apply -k deploy/atlas
+atlas ssh 'findmnt -M /NAS && sudo install -d -m 0700 -o 10001 -g 10001 /NAS/dev/prime-staging/storage'
+atlas ssh 'sudo ~/atlas/k8s/bin/env-secret.sh dev-prime-staging prime-finder-env /DATA/dev/prime-staging/base.env'
+atlas ssh 'sudo ~/atlas/k8s/bin/env-secret.sh dev-prime-staging prime-continuous-env /DATA/dev/prime-staging/prime.env'
+kubectl kustomize deploy/atlas/staging | atlas kube apply --dry-run=server -f -
+kubectl kustomize deploy/atlas/staging | atlas kube apply -f -
+atlas kube -n dev-prime-staging rollout status deploy/dev-prime-finder-coordinator
+atlas ssh 'curl -fsS http://127.0.0.1:28889/healthz'
+atlas publish add prime-dev-api.notallow.cc 28889 --yes
+atlas publish add prime-dev-admin.notallow.cc 28892 --yes
+```
+
+Check that an unauthenticated browser is sent to Access at the staging Admin
+host and that the owner can sign in. Run two staged workers with separate
+enrollments. Verify each appears with its benchmark while pending and that no
+production leases are issued before approval. Approve both, resume mining, and
+verify distinct assignments and exact archive output. Exercise a lease expiry,
+worker revocation, and a coordinator restart. Use the local dashboard against
+the staging API and measure verified primes per second and verification queue
+pressure with one worker and with two.
+
+```sh
+prime --server https://prime-dev-api.notallow.cc worker
+prime --server https://prime-dev-api.notallow.cc ui
+curl -fsS https://prime-dev-api.notallow.cc/api/v1/mining/progress
+```
+
+To enroll two staging workers on a single Mac, run each worker in a separate
+terminal with its own absolute `XDG_STATE_HOME`, for example a directory from
+`mktemp -d`. Each terminal prompts for a separate enrollment code.
+
+## Back up and cut over
+
+Drain the existing range workers and pause their queued jobs. Capture the
+running image, archive revision, and the Test Math archive response for a
+covered interval. Use the existing mount at `/NAS/dev/prime-finder/storage`.
+Make a verified backup of the SQLite databases with the coordinator stopped.
+Leave the coordinator stopped until the production overlay is applied.
+
+```sh
+curl -fsS 'https://test-math.notallow.cc/api/v1/summary?lo=2&hi=1000000&buckets=4' > /tmp/prime-test-math-before.json
+atlas kube -n dev-prime-finder get deployment dev-prime-finder-coordinator -o yaml > /tmp/prime-deployment-before.yaml
+atlas kube -n dev-prime-finder scale deployment/dev-prime-finder-coordinator --replicas=0
+atlas kube -n dev-prime-finder wait --for=delete pod -l app.kubernetes.io/component=coordinator,app.kubernetes.io/name=prime-finder --timeout=120s
+atlas ssh 'sudo bash -se' <<'ATLAS'
+set -euo pipefail
+mountpoint=/NAS/dev/prime-finder/storage
+[[ $(findmnt -n -M "$mountpoint" -o FSTYPE) == ext4 ]]
+[[ $(cat "$mountpoint/.prime-archive-id") == prime-finder-atlas-v1 ]]
+destination=/NAS/dev/prime-finder/backups/pre-prime-$(date -u +%Y%m%dT%H%M%SZ)
+install -d -m 0700 "$destination"
+python3 - "$mountpoint" "$destination" <<'PY'
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+mountpoint, destination = map(Path, sys.argv[1:])
+for filename in ('archive.sqlite', 'contributions.sqlite'):
+    source = mountpoint / filename
+    if not source.exists():
+        continue
+    with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)) as original:
+        with closing(sqlite3.connect(destination / filename)) as backup:
+            original.backup(backup)
+            if backup.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
+                raise SystemExit(f'Invalid backup of {filename}')
+PY
+test -s "$destination/archive.sqlite"
+printf 'Verified backup: %s\n' "$destination"
+ATLAS
+# Audit the verified backup with prime-coordinator audit-archive before applying.
+atlas ssh 'sudo ~/atlas/k8s/bin/env-secret.sh dev-prime-finder prime-continuous-env /DATA/dev/prime/prime.env'
+kubectl kustomize deploy/atlas/continuous | atlas kube apply --dry-run=server -f -
+kubectl kustomize deploy/atlas/continuous | atlas kube apply -f -
 atlas kube -n dev-prime-finder rollout status deploy/dev-prime-finder-coordinator
+atlas ssh 'curl -fsS http://127.0.0.1:8789/api/v1/mining/progress'
+curl -fsS 'https://test-math.notallow.cc/api/v1/summary?lo=2&hi=1000000&buckets=4' > /tmp/prime-test-math-after.json
+cmp /tmp/prime-test-math-before.json /tmp/prime-test-math-after.json
 ```
 
-## Private operation
+Run the new image's `prime-coordinator audit-archive /path/to/backup/archive.sqlite` against the stopped archive snapshot before applying the production overlay. Any failed segment is a cutover blocker.
 
-Forward 8787 for the existing worker and CLI. Add 8791 for the private browser UI when the independent Test Math web service is installed.
+Confirm that Prime starts paused with the first gap after the verified
+contiguous prefix. Verify the Access application before adding the Admin
+route. Publish the API and Admin tunnel routes, then upload
+`src/client_assets` to the Cloudflare Pages project `prime` and attach
+`prime.notallow.cc` as its custom domain.
 
 ```sh
-ssh -o ExitOnForwardFailure=yes -N -L 127.0.0.1:8787:127.0.0.1:8787 -L 127.0.0.1:8791:127.0.0.1:8791 atlas
+atlas publish add prime-api.notallow.cc 8789 --yes
+atlas publish add prime-admin.notallow.cc 8792 --yes
+curl -fsS https://prime-api.notallow.cc/healthz
+curl -fsS https://prime-api.notallow.cc/api/v1/mining/progress
+curl -sS -o /dev/null -w '%{http_code}\n' https://prime-api.notallow.cc/api/v1/mining/admin/workers
+curl -sS -D - -o /dev/null https://prime-admin.notallow.cc/
 ```
 
-Supply the private worker token through the environment and start `prime-finder worker --id mac --threads 8`. Use private browser URL `http://127.0.0.1:8791/primes/`. Set `--batch-upload` on the staging worker when comparing the transport. The default sends one block per request.
+The public API must return 404 for Admin routes. Confirm the public UI loads
+progress and archive queries over HTTPS and that Admin approval works after
+signing in. Enroll the Mac, review its benchmark in Admin, approve it, and
+resume mining. Confirm the frontier advances and the worker’s accepted result
+count rises. Publish the verified Homebrew formula after the release workflow
+passes.
 
-### Add another trusted Mac
+If a production issue occurs, pause dispatch in Admin and preserve the new
+database and pre-cutover backup. Rolling back to a pre-Prime image requires
+the compatible pre-cutover snapshot. Keep the newer archive for recovery of
+any work completed after cutover.
 
-Set up the `atlas` SSH alias on the second Mac using the Atlas repository's `mac/install-mac.sh` SSH instructions. Give this Mac its own SSH key. Check that `ssh -o BatchMode=yes atlas true` succeeds before starting the worker. The launcher uses the existing Atlas administrator account to retrieve only the worker token into memory.
-
-```sh
-cargo build --locked --release --bin prime-finder
-bash scripts/run-atlas-mac-worker.sh --check
-bash scripts/run-atlas-mac-worker.sh mac2 4
-```
-
-With the private Mac bundle, use `bash run.command` in the extracted directory and skip the build. Choose a worker ID unique to that Mac. The worker claims blocks from the same Atlas queue, so leave any existing search running. The launcher uses local port 28787 and closes its tunnel when the worker exits. On the home LAN, prefix the command with `PRIME_ATLAS_DIRECT=1` if the alias is trying to use the remote proxy.
-
-## Volunteer rollout
-
-Use a separate staging hostname and scratch archive for enrollment tests and benchmarks. Provision `prime-finder-turnstile` with `PRIME_TURNSTILE_SITE_KEY` and `PRIME_TURNSTILE_SECRET`. Set `PRIME_TURNSTILE_HOSTNAME` to the staging hostname and configure the widget for the same hostname. The `deploy/atlas/volunteers` overlay enables the dedicated loopback listener on 8789. Attach the production hostname `test-math-workers.notallow.cc` only after the platform, throughput, and soak checks pass. Keep 8787 and the private frontend out of public ingress.
-
-Submit a private job of complete aligned blocks at or above `10^16`. Register it with `POST /api/v1/contribute/admin/evidence/campaign` and `{"job_id":123}`. Run a trusted Mac worker with `--use-volunteer-evidence` to consume staged evidence as part of that job. The worker still classifies every candidate and commits through the archive's trusted endpoint. On the private listener, `GET /api/v1/contribute/admin/evidence/status` reports staged and used blocks, `POST /api/v1/contribute/admin/evidence/pause` with `{"paused":true}` pauses evidence leases, and `POST /api/v1/contribute/admin/revoke` revokes a device by ID.
-
-For the earlier redundant verification protocol, submit the decimal-string `lo` and `hi` to `/api/v1/contribute/admin/campaign` and run the trusted worker with `--verify-contributions`. Its counters are available at `/api/v1/contribute/admin/status`.
+The base kustomization and `volunteers` overlay remain available for legacy
+maintenance and isolated benchmarks. Continuous mining and legacy volunteer
+dispatch are mutually exclusive.

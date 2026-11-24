@@ -1,0 +1,126 @@
+:root {
+  color-scheme: dark;
+  font: 16px/1.55 system-ui, sans-serif;
+  background: #141618;
+  color: #f3f1eb;
+  --subtle: #b6b6ae;
+  --accent: #f9cd78;
+  --line: #363739;
+  --panel: #1b1d20;
+  --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+h1, h2, h3, p, dl, dd, ol, ul { margin: 0; }
+h2 { font-size: 1.22rem; font-weight: 650; letter-spacing: -.025em; }
+h3 { font-size: 1.04rem; margin-top: 1.45rem; }
+p, dt, label, details { color: var(--subtle); }
+.masthead {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: .95rem max(1.25rem, calc((100vw - 72rem) / 2));
+}
+.brand {
+  align-items: center;
+  color: inherit;
+  display: flex;
+  font-size: 1.2rem;
+  font-weight: 700;
+  gap: .6rem;
+  letter-spacing: -.025em;
+  text-decoration: none;
+}
+.brand span {
+  background: var(--accent);
+  border-radius: .35rem;
+  color: #1a1814;
+  font: 700 .92rem/1 var(--mono);
+  padding: .42rem .52rem;
+}
+#connection { font-size: .84rem; text-align: right; }
+main { margin-inline: auto; max-width: 74.5rem; padding: 3.1rem 1.25rem; }
+.overview { border-bottom: 1px solid var(--line); padding-bottom: 2rem; }
+.intro { margin-bottom: 2rem; }
+.intro h1 {
+  font-size: clamp(2.25rem, 5.8vw, 4.9rem);
+  font-weight: 690;
+  letter-spacing: -.065em;
+  line-height: 1.05;
+  margin-bottom: .65rem;
+}
+.metrics { display: grid; gap: 1.25rem; grid-template-columns: 1.6fr 1.2fr 1fr .75fr; }
+.metrics dt, .label { font-size: .82rem; }
+.metrics dd {
+  color: var(--accent);
+  font: 600 clamp(1rem, 2.4vw, 1.8rem)/1.35 var(--mono);
+  letter-spacing: -.045em;
+  margin-top: .35rem;
+  overflow-wrap: anywhere;
+}
+.work-grid { display: grid; gap: 1rem; grid-template-columns: 1.2fr 1fr; margin: 1.25rem 0 1rem; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: .75rem; padding: 1.25rem; }
+.label { margin-top: .85rem; }
+.range, .block-list {
+  color: #f3f1eb;
+  font: .86rem/1.45 var(--mono);
+  list-style: none;
+  margin-top: .3rem;
+  overflow-wrap: anywhere;
+  padding: 0;
+}
+.block-list li + li { margin-top: .2rem; }
+.number-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+  list-style: none;
+  margin-top: .75rem;
+  padding: 0;
+}
+.number-list li {
+  background: #252629;
+  border-radius: .35rem;
+  color: #eae6dc;
+  font: .88rem/1.4 var(--mono);
+  overflow-wrap: anywhere;
+  padding: .34rem .53rem;
+}
+.archive { display: grid; gap: .8rem; }
+.archive > div > p { margin-top: .3rem; }
+form { align-items: end; display: flex; flex-wrap: wrap; gap: .65rem; }
+label { flex: 1 1 12rem; font-size: .84rem; }
+input, button { border: 1px solid var(--line); border-radius: .38rem; font: inherit; min-height: 2.55rem; }
+input { background: #141618; color: inherit; display: block; font-family: var(--mono); padding: .37rem .6rem; width: 100%; }
+button { background: var(--accent); color: #1a1814; cursor: pointer; font-size: .89rem; font-weight: 650; padding: .4rem .85rem; }
+button:hover { filter: brightness(1.1); }
+button:disabled { cursor: wait; opacity: .65; }
+button.secondary { background: transparent; color: var(--accent); justify-self: start; margin-top: .25rem; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.archive-status, #prime-list-status { font-size: .85rem; }
+.chart {
+  align-items: end;
+  border-bottom: 1px solid #84827b;
+  display: grid;
+  gap: .2rem;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  height: 10rem;
+  padding-inline: .15rem;
+}
+.chart div { background: var(--accent); border-radius: .15rem .15rem 0 0; min-height: 1px; }
+.chart div[data-covered="0"] { background: #77746d; }
+details summary { cursor: pointer; font-size: .85rem; }
+details ol { columns: 2; font-size: .82rem; margin-top: .4rem; padding-left: 1.5rem; }
+details li { break-inside: avoid; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  main { padding-top: 2rem; }
+  .metrics { grid-template-columns: 1fr 1fr; }
+  .work-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 470px) {
+  details ol { columns: auto; }
+}

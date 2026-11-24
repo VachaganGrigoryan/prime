@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prime Admin</title>
+  <link rel="stylesheet" href="/admin.css">
+  <script src="/admin.js" defer></script>
+</head>
+<body>
+  <header><h1>Prime Admin</h1><a href="https://prime.notallow.cc">Public dashboard</a></header>
+  <main>
+    <section aria-labelledby="mining"><h2 id="mining">Continuous mining</h2>
+      <dl id="progress"></dl>
+      <button id="pause" disabled>Pause mining</button>
+    </section>
+    <section aria-labelledby="workers-heading"><h2 id="workers-heading">Worker pool</h2>
+      <p id="empty" hidden>No workers have enrolled.</p>
+      <div id="workers"></div>
+    </section>
+    <output id="feedback" aria-live="polite"></output>
+  </main>
+</body>
+</html>

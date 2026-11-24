@@ -36,6 +36,10 @@ enum Command {
         /// Optional listener for public volunteer enrollment and submissions.
         #[arg(long)]
         contribute_bind: Option<SocketAddr>,
+        #[arg(long, conflicts_with = "contribute_bind")]
+        mining_bind: Option<SocketAddr>,
+        #[arg(long, requires = "mining_bind")]
+        admin_bind: Option<SocketAddr>,
         #[arg(long, default_value = "prime-data")]
         archive_dir: PathBuf,
         #[arg(long, default_value = "dist")]
@@ -105,6 +109,10 @@ enum Command {
         lo: u64,
         hi: u64,
     },
+    /// Verify every committed segment in an existing SQLite archive snapshot.
+    AuditArchive {
+        database: PathBuf,
+    },
     /// Compute a gap report on the Mac from NDJSON pages of archived prime blocks on stdin.
     Analyze {
         lo: u64,
@@ -138,6 +146,8 @@ async fn main() -> Result<()> {
             bind,
             public_bind,
             contribute_bind,
+            mining_bind,
+            admin_bind,
             archive_dir,
             web_root,
             quota_bytes,
@@ -148,6 +158,8 @@ async fn main() -> Result<()> {
                 bind,
                 public_bind,
                 contribute_bind,
+                mining_bind,
+                admin_bind,
                 archive_dir,
                 web_root,
                 quota_bytes,
@@ -182,6 +194,12 @@ async fn main() -> Result<()> {
                 evidence,
             )
             .await
+        }
+        Command::AuditArchive { database } => {
+            let engine = prime_finder::engine::Engine::new(100_000_000);
+            let checked = prime_finder::archive::Archive::audit_prime_segments(&database, &engine)?;
+            println!("Verified {checked} committed prime segments");
+            Ok(())
         }
         Command::Analyze {
             lo,

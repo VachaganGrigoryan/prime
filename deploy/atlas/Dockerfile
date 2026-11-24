@@ -12,12 +12,12 @@ ENV SQLITE3_STATIC=1 SQLITE3_NO_PKG_CONFIG=1 SQLITE3_LIB_DIR=/opt/sqlite/lib SQL
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
-RUN cargo build --locked --release \
- && ldd target/release/prime-finder > /tmp/runtime-libs \
+RUN cargo build --locked --release --bin prime-coordinator \
+ && ldd target/release/prime-coordinator > /tmp/runtime-libs \
  && ! grep -q libsqlite3 /tmp/runtime-libs
 
 FROM debian:bookworm-slim
-COPY --from=build /build/target/release/prime-finder /usr/local/bin/prime-finder
+COPY --from=build /build/target/release/prime-coordinator /usr/local/bin/prime-coordinator
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 USER 10001:10001
-ENTRYPOINT ["/usr/local/bin/prime-finder"]
+ENTRYPOINT ["/usr/local/bin/prime-coordinator"]

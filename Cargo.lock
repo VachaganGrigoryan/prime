@@ -934,8 +934,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "prime-finder"
-version = "0.1.0"
+name = "prime"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -943,6 +943,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "reqwest",
+ "ring",
  "rpassword",
  "rusqlite",
  "serde",

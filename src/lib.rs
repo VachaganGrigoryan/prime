@@ -5,3 +5,4 @@ pub mod engine;
 pub mod evidence;
 #[cfg(feature = "coordinator")]
 pub mod gap_store;
+pub mod mining_protocol;

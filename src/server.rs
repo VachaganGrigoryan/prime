@@ -1,3 +1,5 @@
+mod mining;
+
 use crate::{Result, secret};
 use axum::{
     Extension, Json, Router,
@@ -39,6 +41,8 @@ pub struct Config {
     pub bind: SocketAddr,
     pub public_bind: Option<SocketAddr>,
     pub contribute_bind: Option<SocketAddr>,
+    pub mining_bind: Option<SocketAddr>,
+    pub admin_bind: Option<SocketAddr>,
     pub archive_dir: PathBuf,
     pub web_root: PathBuf,
     pub quota_bytes: u64,
@@ -303,6 +307,20 @@ pub async fn serve(config: Config) -> Result<()> {
         }
         None => None,
     };
+    let mining = match config.mining_bind {
+        Some(address) => Some((
+            TcpListener::bind(address).await?,
+            mining::PublicConfig::from_env()?,
+        )),
+        None => None,
+    };
+    let operator = match config.admin_bind {
+        Some(address) => Some((
+            TcpListener::bind(address).await?,
+            mining::Access::from_env()?,
+        )),
+        None => None,
+    };
     let app = App {
         shared: Arc::new(Shared {
             archive: Mutex::new(archive),
@@ -324,8 +342,22 @@ pub async fn serve(config: Config) -> Result<()> {
         web_root.clone(),
         contributions.as_ref().map(|(_, state)| state.clone()),
     );
+    let mining_app = app.clone();
+    let operator_app = app.clone();
     tokio::try_join!(
         serve_http(listener, private_routes),
+        async {
+            if let Some((listener, config)) = mining {
+                serve_http(listener, mining::public_router(mining_app, config)).await?;
+            }
+            Ok(())
+        },
+        async {
+            if let Some((listener, access)) = operator {
+                serve_http(listener, mining::operator_router(operator_app, access)).await?;
+            }
+            Ok(())
+        },
         async {
             if let Some(public) = public {
                 eprintln!(
@@ -407,6 +439,11 @@ fn private_router(
                     .with_state(app.clone()),
             ),
         None => archive,
+    };
+    let archive = if app.shared.config.mining_bind.is_some() {
+        archive.merge(mining::private_operator_router(app.clone()))
+    } else {
+        archive
     };
     archive
         .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT))
@@ -501,6 +538,21 @@ async fn auth(State(app): State<App>, request: Request, next: Next) -> Response 
             );
         }
         return response;
+    }
+    if app.shared.config.mining_bind.is_some()
+        && (matches!(
+            path,
+            "/api/v1/worker/claim"
+                | "/api/v1/worker/heartbeat"
+                | "/api/v1/worker/commit"
+                | "/api/v1/worker/commit-batch"
+        ) || (path.starts_with("/api/v1/jobs") && request.method() != Method::GET))
+    {
+        return ApiError(
+            StatusCode::GONE,
+            "Use the continuous Prime worker and Admin".into(),
+        )
+        .into_response();
     }
     if request.method() != Method::GET
         && request.headers().get(header::ORIGIN).is_some_and(|origin| {
@@ -931,10 +983,10 @@ mod tests {
     const ADMIN: &str = "Basic test-admin";
     const WORKER: &str = "Bearer test-worker";
 
-    struct TestDir(PathBuf);
+    pub(super) struct TestDir(PathBuf);
 
     impl TestDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let mut token = [0; 16];
             getrandom::fill(&mut token).unwrap();
             let path =
@@ -950,12 +1002,14 @@ mod tests {
         }
     }
 
-    fn test_app(dir: &TestDir, quota_bytes: u64, reserve_bytes: u64) -> App {
+    pub(super) fn test_app(dir: &TestDir, quota_bytes: u64, reserve_bytes: u64) -> App {
         let archive = Archive::open(&dir.0.join("archive.sqlite")).unwrap();
         let config = Config {
             bind: "127.0.0.1:8787".parse().unwrap(),
             public_bind: None,
             contribute_bind: None,
+            mining_bind: None,
+            admin_bind: None,
             archive_dir: dir.0.clone(),
             web_root: dir.0.clone(),
             quota_bytes,

@@ -1,0 +1,35 @@
+# prime-dev-api.notallow.cc -> 127.0.0.1:28889
+# prime-dev-admin.notallow.cc -> 127.0.0.1:28892 (Cloudflare Access)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dev-prime-finder-coordinator
+  namespace: dev-prime-finder
+spec:
+  template:
+    spec:
+      containers:
+        - name: coordinator
+          args:
+            - serve
+            - --bind
+            - 0.0.0.0:8787
+            - --public-bind
+            - 0.0.0.0:8788
+            - --mining-bind
+            - 0.0.0.0:8789
+            - --admin-bind
+            - 0.0.0.0:8792
+            - --archive-dir
+            - /archive
+            - --quota-bytes
+            - '2000000000'
+            - --reserve-bytes
+            - '200000000'
+          ports:
+            - {name: http, containerPort: 8787, hostPort: 28887, hostIP: 127.0.0.1}
+            - {name: prime-api, containerPort: 8789, hostPort: 28889, hostIP: 127.0.0.1}
+            - {name: prime-admin, containerPort: 8792, hostPort: 28892, hostIP: 127.0.0.1}
+      volumes:
+        - name: archive
+          hostPath: {path: /NAS/dev/prime-staging/storage, type: Directory}

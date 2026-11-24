@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Prime — Search progress</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="./"><span aria-hidden="true">2</span> Prime</a>
+    <p id="connection" role="status">Connecting to Atlas</p>
+  </header>
+  <main>
+    <section class="overview" aria-labelledby="overview-title">
+      <div class="intro">
+        <h1 id="overview-title">The prime search</h1>
+        <p>Atlas verifies the sequence as workers check the next integers.</p>
+      </div>
+      <dl class="metrics">
+        <div>
+          <dt>Checked continuously through</dt>
+          <dd id="frontier">—</dd>
+        </div>
+        <div>
+          <dt>Verified primes</dt>
+          <dd id="prime-count">—</dd>
+        </div>
+        <div>
+          <dt>Recent verified primes per second</dt>
+          <dd id="rate">—</dd>
+        </div>
+        <div>
+          <dt>Online workers</dt>
+          <dd id="workers">—</dd>
+        </div>
+      </dl>
+    </section>
+
+    <div class="work-grid">
+      <section class="panel" aria-labelledby="confirmed-title">
+        <h2 id="confirmed-title">Latest confirmed primes</h2>
+        <ul id="confirmed" class="number-list"><li>Waiting for Atlas</li></ul>
+      </section>
+      <section class="panel" aria-labelledby="work-title">
+        <h2 id="work-title">Current work</h2>
+        <p class="label">Next candidates</p>
+        <p class="range" id="next-range">—</p>
+        <p class="label">Blocks with active leases</p>
+        <ul id="active-blocks" class="block-list"><li>Waiting for Atlas</li></ul>
+      </section>
+    </div>
+
+    <section class="panel archive" aria-labelledby="archive-title">
+      <div>
+        <h2 id="archive-title">Explore the archive</h2>
+        <p>Chart prime counts and look up confirmed primes in any interval.</p>
+      </div>
+      <form id="archive-form">
+        <label>From <input id="range-lo" name="lo" type="text" inputmode="numeric" maxlength="20" required></label>
+        <label>Through <input id="range-hi" name="hi" type="text" inputmode="numeric" maxlength="20" required></label>
+        <button type="submit">Show range</button>
+      </form>
+      <p class="archive-status" id="archive-status" role="status">Waiting for archive coverage</p>
+      <details id="bucket-details" hidden>
+        <summary>Prime counts by interval</summary>
+        <ol id="bucket-list"></ol>
+      </details>
+      <div id="chart" class="chart" aria-hidden="true" hidden></div>
+      <button type="button" class="secondary" id="more-chart" hidden>Load more chart coverage</button>
+      <div id="list-panel" hidden>
+        <h3>Archived primes</h3>
+        <p id="prime-list-status" role="status"></p>
+        <ol id="prime-list" class="number-list"></ol>
+        <button type="button" class="secondary" id="more-primes" hidden>Load more primes</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

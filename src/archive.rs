@@ -1,4 +1,6 @@
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -7,6 +9,9 @@ use std::{
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+mod mining;
+pub use mining::{MiningBenchmark, MiningStatus, MiningSubmission, MiningWorker};
 
 const BLOCK: u128 = crate::block_codec::BLOCK_WIDTH as u128;
 const LEASE_SECONDS: i64 = 120;
@@ -367,7 +372,7 @@ impl Archive {
                  PRAGMA user_version=1;
                  COMMIT;",
             )?,
-            1 | 2 => {}
+            1..=3 => {}
             _ => {
                 return Err(ArchiveError::Corrupt(
                     "unsupported archive schema version".into(),
@@ -379,9 +384,13 @@ impl Archive {
             crate::gap_store::migrate(&mut db)?;
         }
 
+        if version < 3 {
+            mining::migrate(&mut db)?;
+        }
+
         // One coordinator owns the database. Only uncommitted work loses its lease on restart.
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("DELETE FROM segments WHERE rev IS NULL", [])?;
+        mining::expire_leases(&tx, i64::MAX)?;
         crate::gap_store::release_running(&tx)?;
         tx.commit()?;
         Ok(Self { db })
@@ -486,6 +495,7 @@ impl Archive {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        mining::require_legacy(&tx)?;
         tx.execute(
             "DELETE FROM segments WHERE rev IS NULL AND expires<=?",
             [current],
@@ -568,6 +578,7 @@ impl Archive {
     }
 
     pub fn heartbeat(&mut self, token: &str, worker: &str) -> Result<()> {
+        mining::require_legacy(&self.db)?;
         let current = now();
         let rows = self.db.execute(
             "UPDATE segments SET expires=?1 WHERE token=?2 AND worker=?3 AND rev IS NULL AND expires>?4",
@@ -608,6 +619,18 @@ impl Archive {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        mining::require_legacy(&tx)?;
+        Self::commit_prepared(&tx, batch, before_write)?;
+        mining::advance_frontier(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn commit_prepared(
+        tx: &Transaction<'_>,
+        batch: PreparedBatch,
+        before_write: impl FnOnce(usize) -> Result<()>,
+    ) -> Result<()> {
         let current_time = now();
         let pending = {
             let mut lease_row = tx.prepare_cached(
@@ -726,7 +749,6 @@ impl Archive {
                 ])?;
             }
         }
-        tx.commit()?;
         Ok(())
     }
 
