@@ -2,6 +2,8 @@
 name = "prime-finder"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/VachaganGrigoryan/prime-finder"
 publish = false
 default-run = "prime-finder"
 autobins = false

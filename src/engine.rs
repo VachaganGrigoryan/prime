@@ -4,8 +4,8 @@ use std::sync::{Arc, RwLock};
 
 const SEGMENT_BYTES: usize = 32 * 1024;
 const SEGMENT_WIDTH: u64 = SEGMENT_BYTES as u64 * 30;
-const RESIDUES: [u64; 8] = [1, 7, 11, 13, 17, 19, 23, 29];
-const STEPS: [u64; 8] = [6, 4, 2, 4, 2, 4, 6, 2];
+pub(crate) const RESIDUES: [u64; 8] = [1, 7, 11, 13, 17, 19, 23, 29];
+pub(crate) const STEPS: [u64; 8] = [6, 4, 2, 4, 2, 4, 6, 2];
 const RESIDUE_BITS: [u8; 30] = {
     let mut masks = [0; 30];
     let mut i = 0;
@@ -67,7 +67,7 @@ impl Engine {
         primes
     }
 
-    fn base_primes(&self, needed: u32) -> Arc<Vec<u32>> {
+    pub(crate) fn base_primes(&self, needed: u32) -> Arc<Vec<u32>> {
         {
             let base = self.base.read().expect("base-prime cache poisoned");
             if base.limit >= needed {
@@ -93,6 +93,10 @@ impl Engine {
 
 /// Determines primality exactly for all unsigned 64-bit inputs.
 pub fn is_prime(n: u64) -> bool {
+    is_prime_with_bases(n, &WITNESSES, mod_mul)
+}
+
+fn is_prime_with_bases(n: u64, witnesses: &[u64], multiply: impl Fn(u64, u64, u64) -> u64) -> bool {
     if n < 2 {
         return false;
     }
@@ -101,20 +105,36 @@ pub fn is_prime(n: u64) -> bool {
             return n == p;
         }
     }
+    strong_prime_tests(n, witnesses, multiply)
+}
 
+pub(crate) fn is_certificate_factor_prime(n: u64) -> bool {
+    // Jaeschke, §5 provides the strict lower bounds 4,759,123,141 and
+    // 10^12 for composites passing these respective witness sets.
+    // https://cr.yp.to/bib/1993/jaeschke.pdf
+    if n <= u64::from(u32::MAX) {
+        is_prime_with_bases(n, &[2, 7, 61], |a, b, modulus| a * b % modulus)
+    } else if n <= 1_000_000_000_000 {
+        is_prime_with_bases(n, &[2, 13, 23, 1_662_803], mod_mul)
+    } else {
+        is_prime(n)
+    }
+}
+
+fn strong_prime_tests(n: u64, witnesses: &[u64], multiply: impl Fn(u64, u64, u64) -> u64) -> bool {
     let rounds = (n - 1).trailing_zeros();
     let odd_part = (n - 1) >> rounds;
-    'witness: for witness in WITNESSES {
+    'witness: for witness in witnesses {
         let base = witness % n;
         if base == 0 {
             continue;
         }
-        let mut residue = mod_pow(base, odd_part, n);
+        let mut residue = pow_with(base, odd_part, n, &multiply);
         if residue == 1 || residue == n - 1 {
             continue;
         }
         for _ in 1..rounds {
-            residue = mod_mul(residue, residue, n);
+            residue = multiply(residue, residue, n);
             if residue == n - 1 {
                 continue 'witness;
             }
@@ -128,15 +148,24 @@ fn mod_mul(a: u64, b: u64, modulus: u64) -> u64 {
     (u128::from(a) * u128::from(b) % u128::from(modulus)) as u64
 }
 
-fn mod_pow(mut base: u64, mut exponent: u64, modulus: u64) -> u64 {
+pub(crate) fn mod_pow(base: u64, exponent: u64, modulus: u64) -> u64 {
+    pow_with(base, exponent, modulus, &mod_mul)
+}
+
+fn pow_with(
+    mut base: u64,
+    mut exponent: u64,
+    modulus: u64,
+    multiply: &impl Fn(u64, u64, u64) -> u64,
+) -> u64 {
     let mut result = 1;
     while exponent != 0 {
         if exponent & 1 != 0 {
-            result = mod_mul(result, base, modulus);
+            result = multiply(result, base, modulus);
         }
         exponent >>= 1;
         if exponent != 0 {
-            base = mod_mul(base, base, modulus);
+            base = multiply(base, base, modulus);
         }
     }
     result
@@ -154,13 +183,13 @@ fn small_sieve(limit: u32) -> Vec<u32> {
     (2..=limit).filter(|&p| !composite[p as usize]).collect()
 }
 
-fn first_wheel_value(value: u64) -> Option<(u64, usize)> {
+pub(crate) fn first_wheel_value(value: u64) -> Option<(u64, usize)> {
     let rem = value % 30;
     let index = RESIDUES.partition_point(|&residue| residue < rem);
     Some(((value - rem).checked_add(RESIDUES[index])?, index))
 }
 
-fn wheel_candidates(lo: u64, hi: u64, mut emit: impl FnMut(u64)) {
+pub(crate) fn wheel_candidates(lo: u64, hi: u64, mut emit: impl FnMut(u64)) {
     [2, 3, 5]
         .into_iter()
         .filter(|&p| lo <= p && p <= hi)
@@ -178,7 +207,7 @@ fn wheel_candidates(lo: u64, hi: u64, mut emit: impl FnMut(u64)) {
     }
 }
 
-fn segmented(lo: u64, hi: u64, base: &[u32], mut emit: impl FnMut(u64)) {
+pub(crate) fn segmented(lo: u64, hi: u64, base: &[u32], mut emit: impl FnMut(u64)) {
     [2, 3, 5]
         .into_iter()
         .filter(|&p| lo <= p && p <= hi)
@@ -264,6 +293,20 @@ mod tests {
         );
         assert!(!is_prime(3_825_123_056_546_413_051));
         assert!(!is_prime(4_294_967_291_u64.pow(2)));
+    }
+
+    #[test]
+    fn certificate_factor_primality_matches_the_full_test() {
+        for (lo, hi) in [
+            (0, 128),
+            (u64::from(u32::MAX) - 128, u64::from(u32::MAX) + 128),
+            (4_759_123_141 - 128, 4_759_123_141 + 128),
+            (1_000_000_000_000 - 128, 1_000_000_000_000 + 128),
+        ] {
+            for n in lo..=hi {
+                assert_eq!(is_certificate_factor_prime(n), is_prime(n), "{n}");
+            }
+        }
     }
 
     #[test]

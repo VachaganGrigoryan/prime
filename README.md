@@ -10,3 +10,5 @@ cargo build --locked --release
 ```
 
 [Atlas deployment](deploy/atlas/README.md) covers coordinator and archive operations. [Benchmarking](scripts/BENCHMARK.md) describes the batch promotion gate. [Prime Worker](WORKER.md) covers portable volunteer builds and releases.
+
+Prime Finder is [MIT-licensed](LICENSE). Copyright 2026 Vachagan Grigoryan.

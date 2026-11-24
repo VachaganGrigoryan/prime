@@ -1,12 +1,13 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand};
-use prime_finder::{block_codec, engine::Engine};
+use prime_finder::{block_codec, engine::Engine, evidence};
 use reqwest::{StatusCode, Url, redirect};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
     io::{self, IsTerminal, Read},
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -31,6 +32,9 @@ struct Args {
     /// HTTPS origin hosting enrollment and volunteer work.
     #[arg(long, global = true, default_value = DEFAULT_SERVER, value_parser = https_origin)]
     server: Url,
+    /// Trust an additional PEM root for a private test deployment.
+    #[arg(long, global = true, value_name = "PEM")]
+    ca_certificate: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -40,7 +44,11 @@ enum Command {
     /// Show where to enroll this computer and obtain its credential.
     Join,
     /// Process one leased prime block at a time. Press Ctrl+C to stop.
-    Run,
+    Run {
+        /// Generate only divisor evidence for the high-range benchmark.
+        #[arg(long)]
+        divisors_only: bool,
+    },
 }
 
 fn https_origin(value: &str) -> std::result::Result<Url, String> {
@@ -102,7 +110,10 @@ struct Submission<'a> {
     lease: &'a str,
     payload: String,
     checksum: String,
-    count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
 }
 
 #[derive(Deserialize)]
@@ -155,13 +166,17 @@ struct Client {
 }
 
 impl Client {
-    fn new(server: Url, token: String) -> Result<Self> {
+    fn new(server: Url, token: String, ca_certificate: Option<&Path>) -> Result<Self> {
+        let mut builder = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(redirect::Policy::none())
+            .timeout(REQUEST_TIMEOUT);
+        if let Some(path) = ca_certificate {
+            let certificate = reqwest::Certificate::from_pem(&std::fs::read(path)?)?;
+            builder = builder.tls_certs_merge([certificate]);
+        }
         Ok(Self {
-            client: reqwest::Client::builder()
-                .https_only(true)
-                .redirect(redirect::Policy::none())
-                .timeout(REQUEST_TIMEOUT)
-                .build()?,
+            client: builder.build()?,
             server,
             token,
         })
@@ -229,14 +244,46 @@ fn lease_bounds(lease: &Lease) -> Result<(u64, u64)> {
     Ok((lo, hi))
 }
 
-async fn compute_and_submit(client: &Client, engine: Arc<Engine>, lease: Lease) -> Result<()> {
+#[derive(Clone, Copy)]
+enum WorkMode {
+    Evidence { divisors_only: bool },
+    CrossCheck,
+}
+
+async fn compute_and_submit(
+    client: &Client,
+    engine: Arc<Engine>,
+    lease: Lease,
+    mode: WorkMode,
+) -> Result<()> {
     let (lo, hi) = lease_bounds(&lease)?;
     let mut computation = tokio::task::spawn_blocking(move || -> Result<_> {
-        let primes = engine.enumerate(lo, hi);
-        let payload = block_codec::encode(lo, hi, &primes)?;
+        let (payload, count) = match mode {
+            WorkMode::Evidence {
+                divisors_only: true,
+            } => (evidence::generate(&engine, lo, hi)?, None),
+            WorkMode::Evidence {
+                divisors_only: false,
+            } => (evidence::generate_with_certificates(&engine, lo, hi)?, None),
+            WorkMode::CrossCheck => {
+                let primes = engine.enumerate(lo, hi);
+                (
+                    block_codec::encode(lo, hi, &primes)?,
+                    Some(primes.len() as u64),
+                )
+            }
+        };
         let checksum = format!("{:x}", Sha256::digest(&payload));
-        Ok((STANDARD.encode(payload), checksum, primes.len() as u64))
+        Ok((STANDARD.encode(payload), checksum, count))
     });
+    let (renew_route, submit_route, kind) = match mode {
+        WorkMode::Evidence { .. } => (
+            "evidence/heartbeat",
+            "evidence/submit",
+            Some(evidence::KIND),
+        ),
+        WorkMode::CrossCheck => ("heartbeat", "submit", None),
+    };
     let mut heartbeat = time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
     heartbeat.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let body = LeaseToken {
@@ -247,7 +294,7 @@ async fn compute_and_submit(client: &Client, engine: Arc<Engine>, lease: Lease) 
             biased;
             result = &mut computation => break result??,
             _ = heartbeat.tick() => {
-                if let Err(error) = client.acknowledge("heartbeat", &body).await {
+                if let Err(error) = client.acknowledge(renew_route, &body).await {
                     if error.lease_lost() {
                         // A blocking task cannot be cancelled. Let it finish before claiming again.
                         computation.await??;
@@ -268,12 +315,17 @@ async fn compute_and_submit(client: &Client, engine: Arc<Engine>, lease: Lease) 
         payload,
         checksum,
         count,
+        kind,
     };
     let mut retries = 0;
     loop {
-        match client.acknowledge("submit", &submission).await {
+        match client.acknowledge(submit_route, &submission).await {
             Ok(()) => {
-                println!("Submitted {count} primes for {lo}..={hi}; verification pending.");
+                if let Some(count) = count {
+                    println!("Submitted {count} primes for {lo}..={hi}; verification pending.");
+                } else {
+                    println!("Submitted evidence for {lo}..={hi}; verification pending.");
+                }
                 return Ok(());
             }
             Err(error) if error.lease_lost() => {
@@ -295,14 +347,22 @@ async fn compute_and_submit(client: &Client, engine: Arc<Engine>, lease: Lease) 
     }
 }
 
-async fn run(client: Client) -> Result<()> {
+async fn run(client: Client, divisors_only: bool) -> Result<()> {
     let engine = Arc::new(Engine::new(100_000_000));
     loop {
-        match client
-            .post::<_, Option<Lease>>("claim", &serde_json::json!({}))
+        let empty = serde_json::json!({});
+        let (lease, mode) = match client
+            .post::<_, Option<Lease>>("evidence/claim", &empty)
             .await
         {
-            Ok(Some(lease)) => compute_and_submit(&client, engine.clone(), lease).await?,
+            Ok(None) | Err(ApiError::Status(StatusCode::NOT_FOUND)) => (
+                client.post::<_, Option<Lease>>("claim", &empty).await,
+                WorkMode::CrossCheck,
+            ),
+            candidate => (candidate, WorkMode::Evidence { divisors_only }),
+        };
+        match lease {
+            Ok(Some(lease)) => compute_and_submit(&client, engine.clone(), lease, mode).await?,
             Ok(None) => time::sleep(IDLE_POLL).await,
             Err(error) if error.retryable() => {
                 eprintln!("Could not fetch work: {error}; retrying.");
@@ -318,17 +378,20 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         Command::Join => {
-            println!(
-                "Open {} to enroll this computer.",
-                args.server.join("/join")?
-            );
+            let enrollment = args.server.join("/join")?;
+            println!("Open {} to enroll this computer.", enrollment,);
+            if cfg!(target_os = "macos") && io::stdout().is_terminal() {
+                let _ = std::process::Command::new("open")
+                    .arg(enrollment.as_str())
+                    .status();
+            }
             println!("Run prime-worker run and paste the credential when prompted.");
         }
-        Command::Run => {
-            let client = Client::new(args.server, read_token()?)?;
+        Command::Run { divisors_only } => {
+            let client = Client::new(args.server, read_token()?, args.ca_certificate.as_deref())?;
             println!("Waiting for prime research work. Press Ctrl+C to stop.");
             tokio::select! {
-                result = run(client) => result?,
+                result = run(client, divisors_only) => result?,
                 signal = tokio::signal::ctrl_c() => signal?,
             }
         }

@@ -1,5 +1,6 @@
 use crate::{
     Result,
+    contribute::UsedEvidence,
     gap_compute::GapAccumulator,
     secret,
     server::{UPLOAD_BODY_LIMIT, Upload, WorkerPing},
@@ -7,7 +8,9 @@ use crate::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use prime_finder::{
     archive::{Lease, Span, encode},
+    block_codec::BLOCK_WIDTH,
     engine::Engine,
+    evidence,
     gap_store::{GapLease, GapPage, GapReport},
 };
 use reqwest::{Method, Response, StatusCode, Url};
@@ -124,6 +127,13 @@ impl std::fmt::Display for HttpFailure {
 }
 impl std::error::Error for HttpFailure {}
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceMode {
+    Off,
+    Local,
+    Volunteer,
+}
+
 pub async fn run(
     base: String,
     worker: String,
@@ -131,6 +141,7 @@ pub async fn run(
     base_limit: u32,
     batch_upload: bool,
     verify_contributions: bool,
+    evidence: EvidenceMode,
 ) -> Result<()> {
     let client = Client::worker(base)?;
     let engine = Arc::new(Engine::new(base_limit));
@@ -144,6 +155,7 @@ pub async fn run(
             cfg!(target_os = "macos") && slot == 0,
             batch_upload,
             verify_contributions && slot == 0,
+            evidence,
         ));
     }
     tokio::select! {
@@ -163,6 +175,7 @@ async fn worker_loop(
     analyze: bool,
     mut batch_upload: bool,
     verify_contributions: bool,
+    evidence: EvidenceMode,
 ) -> Result<()> {
     let ping = WorkerPing {
         worker: worker.clone(),
@@ -211,8 +224,15 @@ async fn worker_loop(
                         }
                     }
                 });
-                let result =
-                    process(&client, &worker, lease, engine.clone(), &mut batch_upload).await;
+                let result = process(
+                    &client,
+                    &worker,
+                    lease,
+                    engine.clone(),
+                    &mut batch_upload,
+                    evidence,
+                )
+                .await;
                 heartbeat.abort();
                 if let Err(error) = result {
                     eprintln!("batch: {error}");
@@ -289,12 +309,22 @@ async fn process(
     lease: Lease,
     engine: Arc<Engine>,
     batch_upload: &mut bool,
+    mode: EvidenceMode,
 ) -> Result<()> {
     let first = lease.blocks.first().ok_or("Empty lease")?;
     let last = lease.blocks.last().ok_or("Empty lease")?;
     let (lo, hi) = (first.lo, last.hi);
     let start = Instant::now();
-    let primes = tokio::task::spawn_blocking(move || engine.enumerate(lo, hi)).await?;
+    let (primes, used, retire) =
+        if mode == EvidenceMode::Off || !lease.blocks.iter().any(|&span| evidence_eligible(span)) {
+            (
+                tokio::task::spawn_blocking(move || engine.enumerate(lo, hi)).await?,
+                Vec::new(),
+                None,
+            )
+        } else {
+            supported_lease(client, engine, &lease.blocks, mode).await?
+        };
     let compute = start.elapsed().as_secs_f64();
     let upload_start = Instant::now();
     let mut offset = 0;
@@ -334,12 +364,99 @@ async fn process(
         offset = end;
     }
     requests += flush_uploads(client, &mut uploads, batch_upload).await?;
+    if let Some(span) = retire {
+        if let Err(error) = client
+            .post::<_, Value>(
+                "/worker/contribute/evidence/retire",
+                &serde_json::json!({
+                    "lo":span.lo.to_string(), "hi":span.hi.to_string(), "used":used,
+                }),
+            )
+            .await
+        {
+            eprintln!("Could not retire volunteer evidence: {error}");
+        }
+    }
     eprintln!(
-        "worker={worker} range={lo}..={hi} primes={} payload_bytes={bytes} upload_requests={requests} compute_seconds={compute:.6} upload_seconds={:.6}",
+        "worker={worker} range={lo}..={hi} primes={} payload_bytes={bytes} upload_requests={requests} compute_seconds={compute:.6} upload_seconds={:.6} evidence_blocks={}",
         primes.len(),
         upload_start.elapsed().as_secs_f64(),
+        used.len(),
     );
     Ok(())
+}
+
+fn evidence_eligible(span: Span) -> bool {
+    span.lo >= evidence::MIN_LO
+        && span.lo.is_multiple_of(BLOCK_WIDTH)
+        && span.hi.checked_sub(span.lo) == Some(BLOCK_WIDTH - 1)
+}
+
+#[derive(Deserialize)]
+struct EvidencePayload {
+    kind: String,
+    lease: String,
+    checksum: String,
+    payload: String,
+}
+
+async fn supported_lease(
+    client: &Client,
+    engine: Arc<Engine>,
+    blocks: &[Span],
+    mode: EvidenceMode,
+) -> Result<(Vec<u64>, Vec<UsedEvidence>, Option<Span>)> {
+    let mut inputs = Vec::with_capacity(blocks.len());
+    let mut retire: Option<Span> = None;
+    for &span in blocks {
+        let mut evidence = None;
+        if mode == EvidenceMode::Volunteer && evidence_eligible(span) {
+            let covered = retire.get_or_insert(span);
+            covered.hi = span.hi;
+            match client.post("/worker/contribute/evidence", &span).await {
+                Ok(payload) => evidence = payload,
+                Err(error) => eprintln!("Could not fetch volunteer evidence: {error}"),
+            }
+        }
+        inputs.push((span, evidence));
+    }
+    Ok(tokio::task::spawn_blocking(move || {
+        let mut primes = Vec::new();
+        let mut used = Vec::new();
+        for (span, payload) in inputs {
+            if let Some(EvidencePayload {
+                kind,
+                lease,
+                checksum,
+                payload,
+            }) = payload
+            {
+                if kind == evidence::KIND
+                    && payload.len() <= evidence::MAX_BYTES.div_ceil(3) * 4
+                    && let Ok(bytes) = STANDARD.decode(payload)
+                    && format!("{:x}", Sha256::digest(&bytes)) == checksum
+                    && let Ok(mut accepted) = evidence::verify(span.lo, span.hi, &bytes)
+                {
+                    primes.append(&mut accepted);
+                    used.push(UsedEvidence {
+                        span,
+                        checksum,
+                        lease,
+                    });
+                    continue;
+                }
+            }
+            let mut exact = if evidence_eligible(span) {
+                evidence::local_presieve(&engine, span.lo, span.hi)
+                    .unwrap_or_else(|_| engine.enumerate(span.lo, span.hi))
+            } else {
+                engine.enumerate(span.lo, span.hi)
+            };
+            primes.append(&mut exact);
+        }
+        (primes, used, retire)
+    })
+    .await?)
 }
 
 async fn send_upload<T: Serialize + ?Sized>(client: &Client, path: &str, body: &T) -> Result<()> {

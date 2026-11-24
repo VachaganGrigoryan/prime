@@ -1,13 +1,15 @@
 # Prime Worker
 
-Prime Worker enumerates primes for Test Math on volunteer computers. It runs one block at a time in the foreground and sends each result to Atlas over HTTPS. A trusted worker independently recomputes each submission to confirm contribution credit. A matching trusted search fills the published archive.
+Prime Worker helps Test Math fill the prime archive on Atlas. It runs one leased block at a time in the foreground and sends evidence over HTTPS. A trusted Mac checks the evidence, classifies the remaining candidates, and saves the complete prime block.
 
 ## Install and run
 
-On macOS, the cask goes in the [Test Math Homebrew tap](https://github.com/VachaganGrigoryan/homebrew-tap). Once the signed release and its cask are published, install and enroll with these commands.
+Once public enrollment opens, install on an Apple Silicon or Intel Mac with the [Test Math Homebrew tap](https://github.com/VachaganGrigoryan/homebrew-tap). Homebrew builds the CLI from a checksummed release archive.
 
 ```sh
-brew install --cask VachaganGrigoryan/tap/prime-worker
+brew tap VachaganGrigoryan/tap
+brew trust --formula VachaganGrigoryan/tap/prime-worker
+brew install VachaganGrigoryan/tap/prime-worker
 prime-worker join
 prime-worker run
 ```
@@ -27,6 +29,8 @@ cargo test --locked --no-default-features --features volunteer-worker --lib --bi
 cargo build --locked --release --no-default-features --features volunteer-worker --bin prime-worker
 ```
 
-The GitHub workflow builds and runs tests on both Mac architectures, both Linux architectures, and Windows x86-64. Worker tags use `worker-vMAJOR.MINOR.PATCH` and match the package version. The workflow signs and notarizes both Mac binaries before publishing the archives, checksums, and generated `prime-worker.rb`. Review that cask and add it to `Casks/prime-worker.rb` in the existing tap after release assets are available.
+The GitHub workflow builds and runs tests on both Mac architectures, both Linux architectures, and Windows x86-64. It also runs `brew install` and `brew test` against the generated source formula on both Mac architectures. Worker tags use `worker-vMAJOR.MINOR.PATCH` and match the package version. Release assets include the checksummed source archive, the generated `prime-worker.rb`, and the Linux and Windows binaries. Download and verify the tagged release assets with `shasum -a 256 -c SHA256SUMS`, then copy `prime-worker.rb` into `Formula/prime-worker.rb` in the existing tap.
 
-The Mac signing job uses the GitHub secrets `MACOS_CERTIFICATE_P12` and `MACOS_CERTIFICATE_PASSWORD` for the Developer ID identity. It uses `MACOS_NOTARY_KEY_P8`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER` for notarization. The certificate and key secrets contain base64 of their respective files. Before announcing availability, run the released worker through enrollment, claim, submission, and verification on each supported platform.
+Exercise enrollment, claim, submission, and the trusted archive commit on staging using the released worker. Public enrollment opens after exact archive parity, the 20% improvement in durable primes per second against the fastest trusted-only baseline, and the 30-minute soak.
+
+Prime Finder is MIT-licensed. Copyright 2026 Vachagan Grigoryan. See [LICENSE](LICENSE).

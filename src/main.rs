@@ -60,6 +60,12 @@ enum Command {
         /// Recompute staged volunteer blocks on one trusted worker slot.
         #[arg(long)]
         verify_contributions: bool,
+        /// Use volunteer evidence for eligible blocks before committing the exact results.
+        #[arg(long, conflicts_with = "local_presieve")]
+        use_volunteer_evidence: bool,
+        /// Compute a local pre-sieve for the high-range benchmark control.
+        #[arg(long)]
+        local_presieve: bool,
     },
     Submit {
         lo: u64,
@@ -156,7 +162,16 @@ async fn main() -> Result<()> {
             base_limit,
             batch_upload,
             verify_contributions,
+            use_volunteer_evidence,
+            local_presieve,
         } => {
+            let evidence = if use_volunteer_evidence {
+                worker::EvidenceMode::Volunteer
+            } else if local_presieve {
+                worker::EvidenceMode::Local
+            } else {
+                worker::EvidenceMode::Off
+            };
             worker::run(
                 cli.coordinator,
                 id,
@@ -164,6 +179,7 @@ async fn main() -> Result<()> {
                 base_limit,
                 batch_upload,
                 verify_contributions,
+                evidence,
             )
             .await
         }

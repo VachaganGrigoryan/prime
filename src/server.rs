@@ -1,6 +1,6 @@
 use crate::{Result, secret};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path as RoutePath, Query, Request, State},
     http::{HeaderValue, Method, StatusCode, header},
@@ -395,12 +395,48 @@ fn private_router(
         .fallback_service(ServeDir::new(web_root))
         .with_state(app.clone());
     let archive = match contributions {
-        Some(state) => archive.merge(crate::contribute::private_routes(state)),
+        Some(state) => archive
+            .merge(crate::contribute::private_routes(state.clone()))
+            .merge(
+                Router::new()
+                    .route(
+                        "/api/v1/contribute/admin/evidence/campaign",
+                        post(evidence_campaign),
+                    )
+                    .layer(Extension(state))
+                    .with_state(app.clone()),
+            ),
         None => archive,
     };
     archive
         .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT))
         .layer(middleware::from_fn_with_state(app, auth))
+}
+
+#[derive(Deserialize)]
+struct EvidenceCampaignRequest {
+    job_id: i64,
+    #[serde(default)]
+    close: bool,
+}
+
+async fn evidence_campaign(
+    State(app): State<App>,
+    Extension(contributions): Extension<crate::contribute::Contributions>,
+    Json(request): Json<EvidenceCampaignRequest>,
+) -> Api<Response> {
+    let id = request.job_id;
+    if request.close {
+        return Ok(crate::contribute::close_evidence_campaign(contributions, id).await);
+    }
+    let job = app.db(move |db| Ok(db.job(id)?)).await?;
+    if !matches!(job.state.as_str(), "queued" | "running" | "paused") {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "An active archive job is required".into(),
+        ));
+    }
+    Ok(crate::contribute::start_evidence_campaign(contributions, id, job.span).await)
 }
 
 fn public_routes(mut app: App, web_root: PathBuf) -> Router {
@@ -979,6 +1015,82 @@ mod tests {
         let (status, body) = send(app, Method::GET, path, ADMIN, Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         serde_json::from_str(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn evidence_campaign_requires_private_admin_and_matching_archive_job() {
+        let dir = TestDir::new();
+        let app = test_app(&dir, 50_000_000, 5_000_000);
+        let contributions = crate::contribute::open(
+            &dir.0.join("contributions.sqlite"),
+            "test-key".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+        let public = crate::contribute::public_routes(contributions.clone());
+        let private = private_router(app.clone(), dir.0.clone(), Some(contributions));
+        let path = "/api/v1/contribute/admin/evidence/campaign";
+        assert_eq!(
+            send(&public, Method::POST, path, ADMIN, json!({"job_id":1}))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(&private, Method::POST, path, WORKER, json!({"job_id":1}))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(&private, Method::POST, path, ADMIN, json!({"job_id":1}))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        let width = prime_finder::block_codec::BLOCK_WIDTH;
+        let hi = u64::MAX;
+        let lo = hi - width + 1;
+        let job = app
+            .db(move |archive| Ok(archive.create_job(Span { lo, hi })?))
+            .await
+            .unwrap();
+        let configured = post(&private, path, ADMIN, json!({"job_id":job.id})).await;
+        assert_eq!(configured["span"], serde_json::to_value(job.span).unwrap());
+        let status = get(&private, "/api/v1/contribute/admin/evidence/status").await;
+        assert_eq!(status["campaign"]["job_id"], job.id);
+        assert_eq!(status["used_blocks"], 0);
+        assert_eq!(
+            send(
+                &private,
+                Method::POST,
+                "/api/v1/worker/contribute/evidence",
+                WORKER,
+                serde_json::to_value(job.span).unwrap()
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let span = Span { lo: lo + 1, hi };
+        let unaligned = app
+            .db(move |archive| Ok(archive.create_job(span)?))
+            .await
+            .unwrap();
+        post(&private, path, ADMIN, json!({"job_id":job.id,"close":true})).await;
+        assert_eq!(
+            send(
+                &private,
+                Method::POST,
+                path,
+                ADMIN,
+                json!({"job_id":unaligned.id})
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]

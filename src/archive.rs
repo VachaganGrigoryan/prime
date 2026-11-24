@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -271,6 +271,42 @@ pub fn decode(span: Span, count: u64, payload: &[u8]) -> Result<Vec<u64>> {
 
 pub struct Archive {
     pub(crate) db: Connection,
+}
+
+/// Reads only durable segment metadata from a running archive.
+pub struct ArchiveCoverage(Connection);
+
+impl ArchiveCoverage {
+    pub fn open(path: &Path) -> Result<Self> {
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        Ok(Self(db))
+    }
+
+    pub fn can_claim(&self, job_id: i64) -> Result<bool> {
+        Ok(self
+            .0
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=? AND state='queued')")?
+            .query_row([job_id], |row| row.get(0))?)
+    }
+
+    pub fn overlaps_committed(&self, span: Span) -> Result<bool> {
+        Ok(self.0.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM segments WHERE lo BETWEEN ?1 AND ?2 AND rev IS NOT NULL)
+             OR EXISTS(SELECT 1 FROM
+                (SELECT hi,rev FROM segments WHERE lo<?1 ORDER BY lo DESC LIMIT 1)
+                WHERE hi>=?1 AND rev IS NOT NULL)",
+        )?.query_row(params![key(span.lo),key(span.hi)], |row|row.get(0))?)
+    }
+
+    pub fn contains_block(&self, span: Span) -> Result<bool> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM segments WHERE lo=? AND hi=? AND rev IS NOT NULL)",
+            )?
+            .query_row(params![key(span.lo), key(span.hi)], |row| row.get(0))?)
+    }
 }
 
 impl Archive {

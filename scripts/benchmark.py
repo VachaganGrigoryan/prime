@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -81,10 +81,14 @@ def free_port():
 
 
 @contextmanager
-def child(command, env, output):
+def child(command, env, output, credential=None):
     with output.open("wb") as log:
-        process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   stdin=subprocess.PIPE if credential is not None else None)
         try:
+            if credential is not None:
+                with process.stdin as incoming:
+                    incoming.write((credential + "\n").encode("ascii"))
             yield process
         finally:
             if process.poll() is None:
@@ -126,6 +130,22 @@ def trial_endpoint(args, root, trial):
         try:
             endpoints = hook_json(args.prepare, *identity)
             origin = check_origin(endpoints["origin"], atlas=True)
+            if mode == "evidence":
+                volunteer_origin = urlsplit(endpoints["volunteer_origin"])
+                if (volunteer_origin.scheme != "https" or not volunteer_origin.hostname
+                        or volunteer_origin.hostname == "test-math-workers.notallow.cc"
+                        or volunteer_origin.username is not None or volunteer_origin.path not in ("", "/")
+                        or volunteer_origin.query or volunteer_origin.fragment):
+                    raise ValueError("Expected a separate HTTPS origin for staging volunteers")
+                tokens = endpoints["volunteer_tokens"]
+                if (not isinstance(tokens, list) or not 1 <= len(tokens) <= 32
+                        or any(not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token)
+                               or token in (env["PRIME_ADMIN_TOKEN"], env["PRIME_WORKER_TOKEN"])
+                               for token in tokens)
+                        or len(set(tokens)) != len(tokens)):
+                    raise ValueError("Expected separate staging volunteer credentials")
+                env["PRIME_BENCH_VOLUNTEER_ORIGIN"] = volunteer_origin.geturl()
+                env["PRIME_BENCH_VOLUNTEER_TOKENS"] = json.dumps(tokens)
             measure = (lambda when: hook_json(args.metrics, origin, when)) if args.metrics else None
             yield (Api(origin, env["PRIME_ADMIN_TOKEN"]),
                    Api(check_origin(endpoints["read_origin"], atlas=True)), env, None, measure)
@@ -135,10 +155,17 @@ def trial_endpoint(args, root, trial):
     env["PRIME_ADMIN_TOKEN"] = secrets.token_hex(32)
     env["PRIME_WORKER_TOKEN"] = secrets.token_hex(32)
     if args.atlas_image:
-        from atlas_benchmark import AtlasTrial, PRIVATE_PORT, READ_PORT
+        from atlas_benchmark import AtlasTrial, PRIVATE_PORT, READ_PORT, volunteer_tls
 
-        stage = AtlasTrial(args.atlas_image, args.atlas_memory, direct=args.atlas_direct)
-        with stage.endpoints(env, root / "tunnel.log") as tunnel:
+        stage = AtlasTrial(args.atlas_image, args.atlas_memory, direct=args.atlas_direct,
+                           volunteer_slots=args.volunteer_slots if mode == "evidence" else 0)
+        with ExitStack() as staged:
+            tunnel = staged.enter_context(stage.endpoints(env, root / "tunnel.log"))
+            if mode == "evidence":
+                origin, certificate = staged.enter_context(volunteer_tls(root))
+                env["PRIME_BENCH_VOLUNTEER_ORIGIN"] = origin
+                env["PRIME_BENCH_VOLUNTEER_CA"] = certificate
+                env["PRIME_BENCH_VOLUNTEER_TOKENS"] = json.dumps(stage.seed_devices())
             yield (Api(f"http://127.0.0.1:{PRIVATE_PORT}", env["PRIME_ADMIN_TOKEN"]),
                    Api(f"http://127.0.0.1:{READ_PORT}"), env, tunnel, lambda _: stage.metrics())
         return
@@ -196,6 +223,10 @@ def run_trial(args, trial, root):
             raise RuntimeError("Isolated archive is paused")
         if public.json("/capabilities") != {"mode": "public"}:
             raise RuntimeError("Expected the read-only coordinator on the read origin")
+        if mode == "evidence":
+            staging = api.json("/contribute/admin/evidence/status")
+            if any(staging[key] != 0 for key in ("ready", "leased", "used_blocks")) or staging["campaign"] is not None:
+                raise RuntimeError("Refusing to benchmark a previously used evidence queue")
         if mode == "batch":
             try:
                 Api(api.origin, env["PRIME_WORKER_TOKEN"], worker=True).json("/worker/commit-batch", [])
@@ -215,6 +246,10 @@ def run_trial(args, trial, root):
                    "--id", f"bench-{mode}-{slots}", "--threads", str(slots)]
         if mode == "batch":
             command += ["--batch-upload"]
+        if mode == "local-presieve":
+            command += ["--local-presieve"]
+        if mode == "evidence":
+            command += ["--use-volunteer-evidence"]
         worker_log = root / "worker.log"
         samples = []
         progress = []
@@ -225,7 +260,28 @@ def run_trial(args, trial, root):
         reads.start()
         try:
             start = time.monotonic()
-            with child(command, env, worker_log) as worker:
+            with ExitStack() as processes:
+                volunteers = []
+                if mode == "evidence":
+                    api.json("/contribute/admin/evidence/campaign", {"job_id": int(job["id"])})
+                    api.json("/contribute/admin/evidence/pause", {"paused": False})
+                    origin = env.pop("PRIME_BENCH_VOLUNTEER_ORIGIN")
+                    tokens = json.loads(env.pop("PRIME_BENCH_VOLUNTEER_TOKENS"))
+                    certificate = env.pop("PRIME_BENCH_VOLUNTEER_CA", None)
+                    volunteer_env = {key: value for key, value in env.items() if not key.startswith("PRIME_")}
+                    for index, token in enumerate(tokens):
+                        if args.volunteer_run:
+                            command_line = [args.volunteer_run, str(index), origin]
+                        else:
+                            command_line = [args.volunteer_binary, "--server", origin]
+                            if certificate:
+                                command_line += ["--ca-certificate", certificate]
+                            command_line.append("run")
+                        volunteers.append(processes.enter_context(child(
+                            command_line, volunteer_env,
+                            root / f"volunteer-{index}.log", credential=token,
+                        )))
+                worker = processes.enter_context(child(command, env, worker_log))
                 while True:
                     current = api.json("/jobs/" + job["id"])
                     duration = time.monotonic() - start
@@ -237,11 +293,20 @@ def run_trial(args, trial, root):
                         break
                     if worker.poll() is not None:
                         raise RuntimeError(f"Worker exited with status {worker.returncode}")
+                    if any(process.poll() is not None for process in volunteers):
+                        raise RuntimeError("A staging volunteer exited during the trial")
                     if current["state"] not in ("queued", "running"):
                         raise RuntimeError(f"Benchmark job entered state {current['state']}")
                     if duration > args.timeout:
                         raise RuntimeError(f"Benchmark job timed out after {duration:.1f} seconds")
                     time.sleep(args.poll_interval)
+                if mode == "evidence":
+                    # The worker records evidence use after the archive has committed the block.
+                    deadline = time.monotonic() + 3.0
+                    while time.monotonic() < deadline:
+                        if api.json("/contribute/admin/evidence/status")["used_blocks"] > 0:
+                            break
+                        time.sleep(args.poll_interval)
         finally:
             stop.set()
             reads.join(timeout=6)
@@ -252,6 +317,11 @@ def run_trial(args, trial, root):
         if count != exported_count:
             raise RuntimeError(f"Expected {count} exported primes, received {exported_count}")
         after = measure("after") if measure else None
+        donor_blocks = 0
+        if mode == "evidence":
+            donor_blocks = api.json("/contribute/admin/evidence/status")["used_blocks"]
+            if type(donor_blocks) is not int or donor_blocks <= 0:
+                raise RuntimeError("No durable block used volunteer evidence")
         memory_gate = False
         if before is not None and after is not None:
             memory_gate = all(type(before.get(key)) is int and before[key] == after.get(key)
@@ -268,7 +338,8 @@ def run_trial(args, trial, root):
                 for status in {code for code, _ in samples if code != 200}
             )),
             "public_p95_ms": p95, "metrics_before": before, "metrics_after": after,
-            "measured_no_oom_or_restart": memory_gate, **phase_times(worker_log),
+            "measured_no_oom_or_restart": memory_gate, "volunteer_blocks_used": donor_blocks,
+            **phase_times(worker_log),
         }
 
 
@@ -292,13 +363,37 @@ def compare(trials, slots):
             "improvement_percent_vs_best_single": gain, "meets_20_percent_gate": gain >= 20}
 
 
+def compare_evidence(trials, slots):
+    if len({(run["covered"], run["primes"], run["sha256"]) for run in trials}) != 1:
+        raise RuntimeError("Exact job totals or export SHA-256 differ between evidence trials")
+    by_slots = {}
+    for count in slots:
+        groups = {mode: [run["primes_per_second"] for run in trials
+                         if run["mode"] == mode and run["slots"] == count]
+                  for mode in ("single", "local-presieve", "evidence")}
+        medians = {mode: statistics.median(group) for mode, group in groups.items() if group}
+        paired = min(map(len, groups.values())) >= 3
+        gain = ((medians["evidence"] / max(medians["single"], medians["local-presieve"]) - 1) * 100
+                if paired else None)
+        by_slots[count] = {"median_primes_per_second": medians,
+                           "improvement_percent_vs_fastest_control": gain,
+                           "meets_20_percent_gate": gain is not None and gain >= 20}
+    return {"exact_outputs_match": len({run["mode"] for run in trials}) > 1,
+            "comparisons_by_trusted_slots": by_slots}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default="target/release/prime-finder")
     parser.add_argument("--lo", type=int, default=99_731_564_545)
     parser.add_argument("--hi", type=int, default=100_000_000_000)
     parser.add_argument("--slots", type=int, nargs="+", default=[1, 2, 4, 8])
-    parser.add_argument("--mode", choices=("both", "single", "batch"), default="both")
+    parser.add_argument("--mode", choices=("both", "single", "batch", "evidence-compare", "evidence"), default="both")
+    parser.add_argument("--volunteer-binary", default="target/release/prime-worker")
+    parser.add_argument("--volunteer-run", help="Run a staging volunteer on another Mac; receives INDEX and HTTPS_ORIGIN")
+    parser.add_argument("--volunteer-slots", type=int, default=6, choices=range(1, 33), metavar="1..32",
+                        help="Local volunteer processes for a built-in Atlas evidence trial")
+    parser.add_argument("--expected-export-sha256", help="Trusted export digest for a separate soak range")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=3600, help="Maximum seconds per job")
     parser.add_argument("--poll-interval", type=float, default=0.05)
@@ -334,6 +429,18 @@ def parse_args():
             args.timeout, args.poll_interval, args.read_interval)):
         parser.error("repeats, timeout, and polling intervals must be positive")
     args.binary = str(Path(args.binary).resolve(strict=True))
+    if args.mode in ("evidence-compare", "evidence"):
+        if not args.atlas_image and (not args.prepare or not args.metrics):
+            parser.error("evidence benchmarking requires an Atlas image or isolated Atlas hooks and metrics")
+        if args.atlas_image and args.volunteer_run:
+            parser.error("--volunteer-run requires a staging HTTPS origin from external hooks")
+        block = 1 << 20
+        if args.lo < 10**16 or args.lo % block or (args.hi + 1) % block:
+            parser.error("evidence benchmarking requires full archive blocks at or above 10^16")
+        if not args.volunteer_run:
+            args.volunteer_binary = str(Path(args.volunteer_binary).resolve(strict=True))
+    if args.expected_export_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", args.expected_export_sha256):
+        parser.error("expected export SHA-256 must be 64 lowercase hexadecimal characters")
     if args.log_dir:
         args.log_dir.mkdir(parents=True, exist_ok=True)
     return args
@@ -346,8 +453,14 @@ def main():
         logs = Path(directory)
         for repeat in range(1, args.repeats + 1):
             modes = ("single", "batch") if repeat % 2 else ("batch", "single")
+            if args.mode == "evidence-compare":
+                order = ("single", "local-presieve", "evidence")
+                shift = (repeat - 1) % len(order)
+                modes = order[shift:] + order[:shift]
+            elif args.mode == "evidence":
+                modes = ("evidence",)
             for slots, mode in itertools.product(args.slots, modes):
-                if args.mode != "both" and mode != args.mode:
+                if args.mode not in ("both", "evidence-compare") and mode != args.mode:
                     continue
                 root = logs / f"{mode}-{slots}-{repeat}"
                 root.mkdir()
@@ -357,12 +470,18 @@ def main():
                     if args.log_dir:
                         for log in root.glob("*.log"):
                             (args.log_dir / f"{logs.name}-{root.name}-{log.name}").write_bytes(log.read_bytes())
-        report = compare(trials, args.slots)
+        evidence = args.mode in ("evidence", "evidence-compare")
+        report = compare_evidence(trials, args.slots) if evidence else compare(trials, args.slots)
         report["trials"] = trials
         report["range"] = {"lo": str(args.lo), "hi": str(args.hi)}
+        if args.expected_export_sha256 is not None:
+            if any(run["sha256"] != args.expected_export_sha256 for run in trials):
+                raise RuntimeError("An export differs from the supplied trusted SHA-256")
+            report["exact_outputs_match"] = True
         report["mixed_workload_30_minute_soak_passed"] = bool((args.prepare or args.atlas_image) and any(
-            run["mode"] == "batch" and run["seconds"] >= 1800
-            and run["public_reads"] > sum(run["public_errors"].values())
+            run["mode"] == ("evidence" if evidence else "batch") and run["seconds"] >= 1800
+            and (run["public_reads"] > sum(run["public_errors"].values()) if not evidence
+                 else args.expected_export_sha256 and run["public_reads"] > 0 and not run["public_errors"])
             and run["measured_no_oom_or_restart"]
             for run in trials
         ))
