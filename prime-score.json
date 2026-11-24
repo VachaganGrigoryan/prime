@@ -2,12 +2,12 @@
   "schema": 1,
   "kind": "score",
   "origin": "https://prime-api.notallow.cc",
-  "revision": "145330",
+  "revision": "161812",
   "model_version": "atlas-prime-models-v1",
   "zero_sha256": "ab0def6e153e5601b230ef139c94438c1e43bc884a5baf62754ba39d917923f3",
   "manifest_sha256": "d3a3c2cfaab362b47a3f10a5bf7100e2dfa9b0cbb429fc9bf0a6774415c2873f",
   "prediction_revision": "145330",
-  "created_at": "2026-11-24T17:34:34+00:00",
+  "created_at": "2026-11-24T19:24:38+00:00",
   "cells": [
     {
       "location": "Prospective range",
@@ -455,5 +455,18 @@
         }
       }
     }
-  ]
+  ],
+  "publication": {
+    "schema": 1,
+    "kind": "publication-witness",
+    "origin": "https://prime-api.notallow.cc",
+    "revision": "161802",
+    "model_version": "atlas-prime-models-v1",
+    "zero_sha256": "ab0def6e153e5601b230ef139c94438c1e43bc884a5baf62754ba39d917923f3",
+    "observed_at": "2026-11-24T19:24:37+00:00",
+    "verified_through": "169658548223",
+    "manifest_sha256": "d3a3c2cfaab362b47a3f10a5bf7100e2dfa9b0cbb429fc9bf0a6774415c2873f",
+    "url": "https://prime.notallow.cc/prime-prediction.json",
+    "pages_commit": "d1e76904c8494e4194478229404f3d2bcd25978e"
+  }
 }
