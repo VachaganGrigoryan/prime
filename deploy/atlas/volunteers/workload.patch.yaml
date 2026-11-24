@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dev-prime-finder-coordinator
+  namespace: dev-prime-finder
+spec:
+  template:
+    spec:
+      containers:
+        - name: coordinator
+          args: [serve, --bind, "0.0.0.0:8787", --public-bind, "0.0.0.0:8788", --contribute-bind, "0.0.0.0:8789", --archive-dir, /archive, --web-root, /app/web, --mount-id, prime-finder-atlas-v1]
+          envFrom:
+            - secretRef: {name: prime-finder-env}
+            - secretRef: {name: prime-finder-turnstile}
+          ports:
+            - {name: volunteer-http, containerPort: 8789, hostPort: 8789, hostIP: 127.0.0.1}
