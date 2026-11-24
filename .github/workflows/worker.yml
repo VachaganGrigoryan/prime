@@ -1,0 +1,180 @@
+name: Prime Worker
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags: ["worker-v*", "worker-preview-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Package source and generate Homebrew formula
+        shell: bash
+        run: |
+          version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+          formula=prime-worker
+          preview=()
+          if [[ "$GITHUB_REF" == refs/tags/worker-preview-v* ]]; then
+            test "$GITHUB_REF_NAME" = "worker-preview-v$version"
+            formula=prime-worker-preview
+            preview=(--preview)
+          elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$GITHUB_REF_NAME" = "worker-v$version"
+          fi
+          archive="prime-worker-$version-source.tar.gz"
+          mkdir dist
+          git archive --format=tar --prefix="prime-finder-$version/" HEAD | gzip -n > "dist/$archive"
+          (cd dist && sha256sum "$archive" > SOURCE_SHA256SUMS)
+          ruby scripts/render-worker-formula.rb "$version" dist/SOURCE_SHA256SUMS "${preview[@]}" > "dist/$formula.rb"
+          ruby -c "dist/$formula.rb"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-source
+          path: dist/
+          if-no-files-found: error
+
+  homebrew:
+    name: Homebrew on ${{ matrix.os }}
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8097 # v4.3.0
+        with:
+          name: worker-source
+          path: worker-source/
+      - name: Update Homebrew
+        run: brew update
+      - name: Install and test the generated formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        shell: bash
+        run: |
+          tap=testmath/worker-ci
+          definitions=(worker-source/prime-worker*.rb)
+          test "${#definitions[@]}" = 1
+          filename=$(basename "${definitions[0]}")
+          formula="$tap/${filename%.rb}"
+          brew tap-new --no-git "$tap"
+          install -m 0644 "${definitions[0]}" "$(brew --repository "$tap")/Formula/$filename"
+          brew trust --formula "$formula"
+          archive=$(awk '{print $2}' worker-source/SOURCE_SHA256SUMS)
+          cache=$(brew --cache --build-from-source --formula "$formula")
+          mkdir -p "$(dirname "$cache")"
+          install -m 0644 "worker-source/$archive" "$cache"
+          brew install --build-from-source "$formula"
+          brew test "$formula"
+          "$(brew --prefix "$formula")/bin/prime-worker" --version
+
+  native:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      WORKER_TARGET: ${{ matrix.target }}
+      # AWS-LC ships Windows assembly objects in its checksummed crate.
+      AWS_LC_SYS_PREBUILT_NASM: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.99.1 --profile minimal --target "$WORKER_TARGET"
+      - name: Test and build native worker
+        run: |
+          cargo +1.99.1 test --locked --no-default-features --features volunteer-worker --lib --bin prime-worker --target "$WORKER_TARGET"
+          cargo +1.99.1 build --locked --release --no-default-features --features volunteer-worker --bin prime-worker --target "$WORKER_TARGET"
+          worker="target/$WORKER_TARGET/release/prime-worker"
+          if [[ "$RUNNER_OS" == Windows ]]; then worker+=".exe"; fi
+          "$worker" --help
+          "$worker" join
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$("$worker" --version)" = "prime-worker ${GITHUB_REF_NAME##*v}"
+          fi
+      - name: Package versioned release assets
+        if: github.ref_type == 'tag' && runner.os != 'macOS'
+        run: |
+          mkdir artifacts
+          worker_dir="target/$WORKER_TARGET/release"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            powershell.exe -NoProfile -Command "Compress-Archive -ErrorAction Stop -LiteralPath '$worker_dir/prime-worker.exe','LICENSE' -DestinationPath 'artifacts/prime-worker-$WORKER_TARGET.zip'"
+          else
+            tar -czf "artifacts/prime-worker-$WORKER_TARGET.tar.gz" -C "$worker_dir" prime-worker -C "$GITHUB_WORKSPACE" LICENSE
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.ref_type == 'tag' && runner.os != 'macOS'
+        with:
+          name: ${{ matrix.target }}
+          path: artifacts/
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [source, homebrew, native]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release/
+          merge-multiple: true
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          cd release
+          sha256sum -c SOURCE_SHA256SUMS
+          rm SOURCE_SHA256SUMS
+          sha256sum prime-worker-*.tar.gz prime-worker-*.zip prime-worker*.rb > SHA256SUMS
+      - name: Publish complete tagged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft); then
+            if [[ "$draft" != true ]]; then
+              echo "The tagged release is already public. Publish a new version to change it." >&2
+              exit 1
+            fi
+          else
+            flags=(--verify-tag --draft --generate-notes)
+            if [[ "$tag" == worker-preview-v* ]]; then
+              flags+=(--prerelease --title "Prime Worker ${tag#worker-preview-v} Preview")
+            fi
+            gh release create "$tag" "${flags[@]}"
+          fi
+          gh release upload "$tag" --clobber release/*
+          gh release edit "$tag" --draft=false

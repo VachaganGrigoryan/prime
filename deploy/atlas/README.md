@@ -30,6 +30,18 @@ ssh -o ExitOnForwardFailure=yes -N -L 127.0.0.1:8787:127.0.0.1:8787 -L 127.0.0.1
 
 Supply the private worker token through the environment and start `prime-finder worker --id mac --threads 8`. Use private browser URL `http://127.0.0.1:8791/primes/`. Set `--batch-upload` on the staging worker when comparing the transport. The default sends one block per request.
 
+### Add another trusted Mac
+
+Set up the `atlas` SSH alias on the second Mac using the Atlas repository's `mac/install-mac.sh` SSH instructions. Give this Mac its own SSH key. Check that `ssh -o BatchMode=yes atlas true` succeeds before starting the worker. The launcher uses the existing Atlas administrator account to retrieve only the worker token into memory.
+
+```sh
+cargo build --locked --release --bin prime-finder
+bash scripts/run-atlas-mac-worker.sh --check
+bash scripts/run-atlas-mac-worker.sh mac2 4
+```
+
+With the private Mac bundle, use `bash run.command` in the extracted directory and skip the build. Choose a worker ID unique to that Mac. The worker claims blocks from the same Atlas queue, so leave any existing search running. The launcher uses local port 28787 and closes its tunnel when the worker exits. On the home LAN, prefix the command with `PRIME_ATLAS_DIRECT=1` if the alias is trying to use the remote proxy.
+
 ## Volunteer rollout
 
 Use a separate staging hostname and scratch archive for enrollment tests and benchmarks. Provision `prime-finder-turnstile` with `PRIME_TURNSTILE_SITE_KEY` and `PRIME_TURNSTILE_SECRET`. Set `PRIME_TURNSTILE_HOSTNAME` to the staging hostname and configure the widget for the same hostname. The `deploy/atlas/volunteers` overlay enables the dedicated loopback listener on 8789. Attach the production hostname `test-math-workers.notallow.cc` only after the platform, throughput, and soak checks pass. Keep 8787 and the private frontend out of public ingress.

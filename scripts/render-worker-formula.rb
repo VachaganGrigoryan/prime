@@ -1,12 +1,16 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-version, checksums = ARGV
-unless ARGV.length == 2 && version.match?(/\A\d+\.\d+\.\d+\z/)
-  abort "Usage: #{$PROGRAM_NAME} VERSION SHA256SUMS"
+version, checksums, channel = ARGV
+unless (2..3).cover?(ARGV.length) && version.match?(/\A\d+\.\d+\.\d+\z/) && [nil, "--preview"].include?(channel)
+  abort "Usage: #{$PROGRAM_NAME} VERSION SHA256SUMS [--preview]"
 end
 
 archive = "prime-worker-#{version}-source.tar.gz"
+preview = channel == "--preview"
+formula = preview ? "PrimeWorkerPreview" : "PrimeWorker"
+tag = preview ? "worker-preview-v#{version}" : "worker-v#{version}"
+conflict = preview ? "\n  conflicts_with \"prime-worker\", because: \"both install the prime-worker executable\"" : ""
 digests = File.foreach(checksums).each_with_object([]) do |line, matches|
   digest, name = line.split
   matches << digest if name == archive
@@ -16,10 +20,10 @@ unless digests.size == 1 && digests.first.match?(/\A[0-9a-f]{64}\z/)
 end
 
 puts <<~FORMULA
-  class PrimeWorker < Formula
+  class #{formula} < Formula
     desc "Volunteer worker for the Test Math prime archive"
     homepage "https://test-math.notallow.cc/"
-    url "https://github.com/VachaganGrigoryan/prime-finder/releases/download/worker-v#{version}/#{archive}"
+    url "https://github.com/VachaganGrigoryan/prime-finder/releases/download/#{tag}/#{archive}"
     version "#{version}"
     sha256 "#{digests.first}"
     license "MIT"
@@ -27,7 +31,7 @@ puts <<~FORMULA
     depends_on "cmake" => :build
     depends_on "pkgconf" => :build
     depends_on "rust" => :build
-    depends_on :macos
+    depends_on :macos#{conflict}
 
     deny_network_access!
 

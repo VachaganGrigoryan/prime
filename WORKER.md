@@ -20,6 +20,16 @@ For Linux or Windows, use the archive for your system from the [Prime Finder rel
 
 The command defaults to `https://test-math-workers.notallow.cc`. A test deployment can use `--server` with a different HTTPS origin.
 
+## Test another device on the LAN
+
+Install the preview on macOS with `brew install VachaganGrigoryan/tap/prime-worker-preview`. On Linux or Windows, use the matching binary from the [GitHub preview release](https://github.com/VachaganGrigoryan/prime-finder/releases/tag/worker-preview-v0.1.0), or build the source with the command below. The operator shares the preview HTTPS address, its CA certificate, and a separate one-device credential. Keep that credential private.
+
+```sh
+prime-worker --server "$PREVIEW_ORIGIN" --ca-certificate ./preview-ca.pem run
+```
+
+Paste your device credential when prompted, or supply it over standard input for automation. On Windows, use `prime-worker.exe`. Preview jobs run on an isolated Atlas archive, and their credentials work only for the active preview. The operator runs `python3 scripts/device_preview.py --help` for setup.
+
 ## Build and verify a release
 
 From the Prime Finder checkout, build the portable executable with the volunteer-worker feature.
