@@ -24,6 +24,8 @@ python3 scripts/benchmark.py --atlas-image prime-finder:benchmark \
 
 Each trial creates a pod and a credential secret in `dev-prime-finder`, with its own eight-GB archive quota and scratch directory under `/NAS/dev/prime-finder-benchmarks`. The Mac connects through loopback SSH forwards on ports 19087 and 19088. Both must be free on the Mac and Atlas. The harness collects cgroup v2 counters, then removes the per-trial pod, secret, and scratch data. The production archive stays on its existing mount. Account for its filesystem differences when interpreting storage and memory results.
 
+Add `--atlas-direct` when the Mac can reach the Atlas LAN address and the SSH alias normally uses the Cloudflare proxy.
+
 For another staging layout, provide executable hooks.
 
 - **Prepare** receives `MODE SLOTS REPEAT LO HI`. It creates the disposable coordinator and tunnels and prints one JSON object such as `{"origin":"http://127.0.0.1:19087","read_origin":"http://127.0.0.1:19088"}`. Both origins must use local ports 19000 through 19999.

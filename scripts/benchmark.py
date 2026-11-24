@@ -137,7 +137,7 @@ def trial_endpoint(args, root, trial):
     if args.atlas_image:
         from atlas_benchmark import AtlasTrial, PRIVATE_PORT, READ_PORT
 
-        stage = AtlasTrial(args.atlas_image, args.atlas_memory)
+        stage = AtlasTrial(args.atlas_image, args.atlas_memory, direct=args.atlas_direct)
         with stage.endpoints(env, root / "tunnel.log") as tunnel:
             yield (Api(f"http://127.0.0.1:{PRIVATE_PORT}", env["PRIME_ADMIN_TOKEN"]),
                    Api(f"http://127.0.0.1:{READ_PORT}"), env, tunnel, lambda _: stage.metrics())
@@ -305,6 +305,7 @@ def parse_args():
     parser.add_argument("--read-interval", type=float, default=0.25)
     parser.add_argument("--atlas-image", help="Benchmark an already imported image on Atlas")
     parser.add_argument("--atlas-memory", choices=("512Mi", "1Gi"), default="512Mi")
+    parser.add_argument("--atlas-direct", action="store_true", help="Use the Atlas LAN connection directly")
     parser.add_argument("--prepare", help="Start a disposable Atlas archive and print its endpoints")
     parser.add_argument("--cleanup", help="Stop and remove the disposable Atlas archive")
     parser.add_argument("--metrics", help="Report restart_count, oom_kill and other staging metrics")
@@ -318,6 +319,8 @@ def parse_args():
         parser.error("--prepare and --cleanup must be supplied together")
     if args.atlas_image and (args.prepare or args.metrics):
         parser.error("--atlas-image manages the staging pod and metrics without external hooks")
+    if args.atlas_direct and not args.atlas_image:
+        parser.error("--atlas-direct requires --atlas-image")
     if args.metrics and not args.prepare:
         parser.error("--metrics requires --prepare")
     if args.prepare and not all(os.environ.get(key) for key in ("PRIME_BENCH_ADMIN_TOKEN", "PRIME_BENCH_WORKER_TOKEN")):

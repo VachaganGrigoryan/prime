@@ -14,12 +14,15 @@ READ_PORT = 19088
 
 
 class AtlasTrial:
-    def __init__(self, image, memory):
+    def __init__(self, image, memory, direct=False):
         self.image = image
         self.memory = memory
         self.name = "prime-bench-" + uuid.uuid4().hex[:20]
         self.scratch = f"{SCRATCH_ROOT}/{self.name}"
-        self.ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "atlas"]
+        self.ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+        if direct:
+            self.ssh.extend(["-o", "ProxyCommand=none"])
+        self.ssh.append("atlas")
 
     def remote(self, command, *, body=None, timeout=45):
         result = subprocess.run(
