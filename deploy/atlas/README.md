@@ -1,13 +1,13 @@
 # Prime on Atlas
 
-Atlas runs the coordinator, archive API, and Admin. Cloudflare Pages serves the
-public dashboard from `src/client_assets`. The production overlay upgrades
+Atlas runs the coordinator, archive API, and Admin. The public dashboard uses
+`src/client_assets` and is served by GitHub Pages behind Cloudflare. The production overlay upgrades
 `dev-prime-finder-coordinator` in place, retaining its archive volume, archive
 mount identity, and the read-only ClusterIP port 8788 used by Test Math.
 
 | Host | Atlas origin | Access |
 | --- | --- | --- |
-| `prime.notallow.cc` | Cloudflare Pages | Public stats |
+| `prime.notallow.cc` | GitHub Pages over the Cloudflare tunnel | Public stats |
 | `prime-api.notallow.cc` | `127.0.0.1:8789` | Public reads, Turnstile enrollment, per-device worker bearer |
 | `prime-admin.notallow.cc` | `127.0.0.1:8792` | Owner-only Cloudflare Access |
 | `prime-dev-api.notallow.cc` | `127.0.0.1:28889` | Isolated staging API and enrollment |
@@ -137,9 +137,12 @@ Run the new image's `prime-coordinator audit-archive /path/to/backup/archive.sql
 
 Confirm that Prime starts paused with the first gap after the verified
 contiguous prefix. Verify the Access application before adding the Admin
-route. Publish the API and Admin tunnel routes, then upload
-`src/client_assets` to the Cloudflare Pages project `prime` and attach
-`prime.notallow.cc` as its custom domain.
+route. Publish the API and Admin tunnel routes. Publish the contents of `src/client_assets`
+to the root of the `gh-pages` branch in the Prime repository. GitHub Pages uses
+`prime.notallow.cc` as its custom domain. The Cloudflare tunnel sends dashboard
+requests to `https://vachagangrigoryan.github.io` with `httpHostHeader` set to
+`prime.notallow.cc` and `originServerName` set to `vachagangrigoryan.github.io`.
+The proxied dashboard CNAME points to the same tunnel as the API and Admin.
 
 ```sh
 atlas publish add prime-api.notallow.cc 8789 --yes
