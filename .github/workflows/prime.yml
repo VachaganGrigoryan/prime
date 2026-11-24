@@ -1,0 +1,170 @@
+name: Prime
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  coordinator:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Test with the Atlas SQLite build
+        run: |
+          docker build --target build -t prime-coordinator-ci -f deploy/atlas/Dockerfile .
+          docker run --rm prime-coordinator-ci cargo test --locked --features coordinator
+
+  source:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Build the source archive and render the Homebrew formula
+        shell: bash
+        run: |
+          version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+          archive="prime-$version-source.tar.gz"
+          mkdir dist
+          git archive --format=tar --prefix="prime-$version/" HEAD | gzip -n > "dist/$archive"
+          (cd dist && sha256sum "$archive" > SOURCE_SHA256SUMS)
+          ruby scripts/render-prime-formula.rb "$version" dist/SOURCE_SHA256SUMS > dist/prime.rb
+          ruby -c dist/prime.rb
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prime-source
+          path: dist/
+          if-no-files-found: error
+
+  homebrew:
+    name: Homebrew on ${{ matrix.os }}
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: prime-source
+          path: prime-source/
+      - name: Update Homebrew
+        run: brew update
+      - name: Install and test Prime
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        shell: bash
+        run: |
+          tap=prime-project/ci
+          formula="$tap/prime"
+          (cd prime-source && shasum -a 256 -c SOURCE_SHA256SUMS)
+          brew tap-new --no-git "$tap"
+          install -m 0644 prime-source/prime.rb "$(brew --repository "$tap")/Formula/prime.rb"
+          brew trust --formula "$formula"
+          archive=$(awk '{print $2}' prime-source/SOURCE_SHA256SUMS)
+          cache=$(brew --cache --build-from-source --formula "$formula")
+          mkdir -p "$(dirname "$cache")"
+          install -m 0644 "prime-source/$archive" "$cache"
+          brew install --build-from-source "$formula"
+          brew test "$formula"
+
+  native:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      PRIME_TARGET: ${{ matrix.target }}
+      AWS_LC_SYS_PREBUILT_NASM: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.99.1 --profile minimal --target "$PRIME_TARGET"
+      - name: Test and build Prime
+        run: |
+          cargo +1.99.1 test --locked --no-default-features --features volunteer-worker --lib --bin prime --target "$PRIME_TARGET"
+          cargo +1.99.1 build --locked --release --no-default-features --features volunteer-worker --bin prime --target "$PRIME_TARGET"
+          program="target/$PRIME_TARGET/release/prime"
+          if [[ "$RUNNER_OS" == Windows ]]; then program+=".exe"; fi
+          "$program" worker --help
+          "$program" ui --help
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$("$program" --version)" = "prime ${GITHUB_REF_NAME#v}"
+          fi
+      - name: Package the release binary
+        if: github.ref_type == 'tag'
+        run: |
+          mkdir artifacts
+          program_dir="target/$PRIME_TARGET/release"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            powershell.exe -NoProfile -Command "Compress-Archive -ErrorAction Stop -LiteralPath '$program_dir/prime.exe','LICENSE' -DestinationPath 'artifacts/prime-$PRIME_TARGET.zip'"
+          else
+            tar -czf "artifacts/prime-$PRIME_TARGET.tar.gz" -C "$program_dir" prime -C "$GITHUB_WORKSPACE" LICENSE
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.ref_type == 'tag'
+        with:
+          name: ${{ matrix.target }}
+          path: artifacts/
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [coordinator, source, homebrew, native]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release/
+          merge-multiple: true
+      - name: Verify and checksum the release assets
+        run: |
+          cd release
+          sha256sum -c SOURCE_SHA256SUMS
+          rm SOURCE_SHA256SUMS
+          sha256sum prime-*.tar.gz prime-*.zip prime.rb > SHA256SUMS
+      - name: Publish the complete tagged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft); then
+            test "$draft" = true
+          else
+            gh release create "$tag" --verify-tag --draft --generate-notes --title "Prime ${tag#v}"
+          fi
+          gh release upload "$tag" --clobber release/*
+          gh release edit "$tag" --draft=false
