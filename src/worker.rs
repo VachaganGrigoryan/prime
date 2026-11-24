@@ -406,57 +406,102 @@ async fn supported_lease(
     blocks: &[Span],
     mode: EvidenceMode,
 ) -> Result<(Vec<u64>, Vec<UsedEvidence>, Option<Span>)> {
-    let mut inputs = Vec::with_capacity(blocks.len());
+    if mode == EvidenceMode::Local {
+        let spans = blocks.to_vec();
+        let primes = tokio::task::spawn_blocking(move || {
+            spans
+                .into_iter()
+                .flat_map(|span| exact_block(&engine, span))
+                .collect()
+        })
+        .await?;
+        return Ok((primes, Vec::new(), None));
+    }
+
+    let mut primes = Vec::new();
+    let mut used = Vec::new();
     let mut retire: Option<Span> = None;
-    for &span in blocks {
-        let mut evidence = None;
-        if mode == EvidenceMode::Volunteer && evidence_eligible(span) {
+    let mut prefetched = None;
+    let mut spans = blocks.iter().copied().peekable();
+    while let Some(span) = spans.next() {
+        let payload = if evidence_eligible(span) {
             let covered = retire.get_or_insert(span);
             covered.hi = span.hi;
-            match client.post("/worker/contribute/evidence", &span).await {
-                Ok(payload) => evidence = payload,
-                Err(error) => eprintln!("Could not fetch volunteer evidence: {error}"),
-            }
-        }
-        inputs.push((span, evidence));
-    }
-    Ok(tokio::task::spawn_blocking(move || {
-        let mut primes = Vec::new();
-        let mut used = Vec::new();
-        for (span, payload) in inputs {
-            if let Some(EvidencePayload {
-                kind,
-                lease,
-                checksum,
-                payload,
-            }) = payload
-            {
-                if kind == evidence::KIND
-                    && payload.len() <= evidence::MAX_BYTES.div_ceil(3) * 4
-                    && let Ok(bytes) = STANDARD.decode(payload)
-                    && format!("{:x}", Sha256::digest(&bytes)) == checksum
-                    && let Ok(mut accepted) = evidence::verify(span.lo, span.hi, &bytes)
-                {
-                    primes.append(&mut accepted);
-                    used.push(UsedEvidence {
-                        span,
-                        checksum,
-                        lease,
-                    });
-                    continue;
+            // A volunteer may submit evidence while the previous block computes.
+            let lookup = match prefetched.take() {
+                Some(Ok(None)) | None => fetch_evidence(client, span).await,
+                Some(ready) => ready,
+            };
+            match lookup {
+                Ok(payload) => payload,
+                Err(error) => {
+                    eprintln!("Could not fetch volunteer evidence: {error}");
+                    None
                 }
             }
-            let mut exact = if evidence_eligible(span) {
-                evidence::local_presieve(&engine, span.lo, span.hi)
-                    .unwrap_or_else(|_| engine.enumerate(span.lo, span.hi))
+        } else {
+            None
+        };
+        let engine = engine.clone();
+        let classify = tokio::task::spawn_blocking(move || classify_block(&engine, span, payload));
+        let (mut block, receipt) =
+            if let Some(&next) = spans.peek().filter(|&&next| evidence_eligible(next)) {
+                let (classified, lookup) = tokio::join!(classify, fetch_evidence(client, next));
+                prefetched = Some(lookup);
+                classified?
             } else {
-                engine.enumerate(span.lo, span.hi)
+                classify.await?
             };
-            primes.append(&mut exact);
+        primes.append(&mut block);
+        if let Some(receipt) = receipt {
+            used.push(receipt);
         }
-        (primes, used, retire)
-    })
-    .await?)
+    }
+    Ok((primes, used, retire))
+}
+
+async fn fetch_evidence(client: &Client, span: Span) -> Result<Option<EvidencePayload>> {
+    client.post("/worker/contribute/evidence", &span).await
+}
+
+fn classify_block(
+    engine: &Engine,
+    span: Span,
+    proof: Option<EvidencePayload>,
+) -> (Vec<u64>, Option<UsedEvidence>) {
+    if let Some(EvidencePayload {
+        kind,
+        lease,
+        checksum,
+        payload,
+    }) = proof
+    {
+        if kind == evidence::KIND
+            && payload.len() <= evidence::MAX_BYTES.div_ceil(3) * 4
+            && let Ok(bytes) = STANDARD.decode(payload)
+            && format!("{:x}", Sha256::digest(&bytes)) == checksum
+            && let Ok(primes) = evidence::verify(span.lo, span.hi, &bytes)
+        {
+            return (
+                primes,
+                Some(UsedEvidence {
+                    span,
+                    checksum,
+                    lease,
+                }),
+            );
+        }
+    }
+    (exact_block(engine, span), None)
+}
+
+fn exact_block(engine: &Engine, span: Span) -> Vec<u64> {
+    if evidence_eligible(span)
+        && let Ok(primes) = evidence::local_presieve(engine, span.lo, span.hi)
+    {
+        return primes;
+    }
+    engine.enumerate(span.lo, span.hi)
 }
 
 async fn send_upload<T: Serialize + ?Sized>(client: &Client, path: &str, body: &T) -> Result<()> {

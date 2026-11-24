@@ -269,6 +269,9 @@ def run_trial(args, trial, root):
                     tokens = json.loads(env.pop("PRIME_BENCH_VOLUNTEER_TOKENS"))
                     certificate = env.pop("PRIME_BENCH_VOLUNTEER_CA", None)
                     volunteer_env = {key: value for key, value in env.items() if not key.startswith("PRIME_")}
+                    if certificate:
+                        volunteer_env["NO_PROXY"] = "localhost,127.0.0.1"
+                        volunteer_env["no_proxy"] = volunteer_env["NO_PROXY"]
                     for index, token in enumerate(tokens):
                         if args.volunteer_run:
                             command_line = [args.volunteer_run, str(index), origin]
@@ -405,6 +408,7 @@ def parse_args():
     parser.add_argument("--cleanup", help="Stop and remove the disposable Atlas archive")
     parser.add_argument("--metrics", help="Report restart_count, oom_kill and other staging metrics")
     parser.add_argument("--log-dir", type=Path, help="Keep coordinator and worker process logs here")
+    parser.add_argument("--report", type=Path, help="Also write the completed JSON report to this path")
     args = parser.parse_args()
     if not 0 <= args.lo <= args.hi < 1 << 64:
         parser.error("range bounds must be ascending u64 values")
@@ -485,7 +489,10 @@ def main():
             and run["measured_no_oom_or_restart"]
             for run in trials
         ))
-        print(json.dumps(report, indent=2))
+        output = json.dumps(report, indent=2)
+        if args.report:
+            args.report.write_text(output + "\n", encoding="utf-8")
+        print(output)
 
 
 if __name__ == "__main__":

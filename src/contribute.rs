@@ -1818,6 +1818,11 @@ mod tests {
         )
         .await;
         assert_eq!(counters["used_blocks"], 1);
+        archive.update_job(job.id, "cancel").unwrap();
+        assert_eq!(
+            request(&public, Method::POST, claim, Some(&device.token), json!({})).await,
+            (StatusCode::OK, Value::Null)
+        );
     }
 
     #[tokio::test]

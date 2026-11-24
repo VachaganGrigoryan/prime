@@ -48,10 +48,23 @@ class VolunteerProxy(BaseHTTPRequestHandler):
 
 @contextmanager
 def volunteer_tls(root):
-    certificate, key = root / "volunteer.pem", root / "volunteer.key"
-    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-                    "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
-                    "-keyout", str(key), "-out", str(certificate)], check=True, capture_output=True)
+    ca, ca_key = root / "atlas-stage-ca.pem", root / "atlas-stage-ca.key"
+    certificate, key, request = root / "volunteer.pem", root / "volunteer.key", root / "volunteer.csr"
+    extensions = root / "volunteer.ext"
+    extensions.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+                          "basicConstraints=critical,CA:FALSE\n"
+                          "keyUsage=critical,digitalSignature,keyEncipherment\n"
+                          "extendedKeyUsage=serverAuth\n")
+    for command in (
+        ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+         "-subj", "/CN=Prime Finder Atlas Benchmark CA", "-addext", "basicConstraints=critical,CA:TRUE",
+         "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-keyout", str(ca_key), "-out", str(ca)],
+        ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
+         "-keyout", str(key), "-out", str(request)],
+        ["x509", "-req", "-in", str(request), "-CA", str(ca), "-CAkey", str(ca_key), "-set_serial", "1",
+         "-days", "1", "-extfile", str(extensions), "-out", str(certificate)],
+    ):
+        subprocess.run(["openssl", *command], check=True, capture_output=True)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certificate, key)
     with ThreadingHTTPServer(("127.0.0.1", 0), VolunteerProxy) as server:
@@ -59,7 +72,7 @@ def volunteer_tls(root):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            yield f"https://127.0.0.1:{server.server_port}", str(certificate)
+            yield f"https://127.0.0.1:{server.server_port}", str(ca)
         finally:
             server.shutdown()
             thread.join()
@@ -103,7 +116,7 @@ class AtlasTrial:
                 {"containerPort": 8787, "hostPort": PRIVATE_PORT, "hostIP": "127.0.0.1"},
                 {"containerPort": 8788, "hostPort": READ_PORT, "hostIP": "127.0.0.1"},
             ],
-            "readinessProbe": {"httpGet": {"path": "/healthz", "port": 8787}},
+            "readinessProbe": {"httpGet": {"path": "/healthz", "port": 8787}, "periodSeconds": 1},
             "resources": {"requests": {"memory": "128Mi", "cpu": "250m"},
                           "limits": {"memory": self.memory, "cpu": "1"}},
             "volumeMounts": [{"name": "archive", "mountPath": "/archive"}],
