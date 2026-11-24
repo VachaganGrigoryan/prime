@@ -1,4 +1,5 @@
 mod mining;
+mod resources;
 
 use crate::{Result, secret};
 use axum::{
@@ -63,6 +64,7 @@ struct Shared {
     worker: String,
     config: Config,
     storage_fault: AtomicBool,
+    resources: resources::Monitor,
 }
 
 #[derive(Clone, Serialize)]
@@ -147,20 +149,28 @@ impl App {
 
     fn storage(&self) -> Api<(u64, u64)> {
         let dir = &self.shared.config.archive_dir;
-        let configured = self.shared.config.quota_bytes;
-        let mount_free = volume_free(dir).map_err(internal)?;
-        let used = [
-            "archive.sqlite",
-            "archive.sqlite-wal",
-            "archive.sqlite-shm",
-            "contributions.sqlite",
-            "contributions.sqlite-wal",
-            "contributions.sqlite-shm",
-        ]
-        .into_iter()
-        .filter_map(|name| fs::metadata(dir.join(name)).ok().map(|info| info.len()))
-        .fold(0_u64, u64::saturating_add);
-        Ok((configured, mount_free.min(configured.saturating_sub(used))))
+        let quota = self.shared.config.quota_bytes;
+        let volume = volume_space(dir).map_err(internal)?;
+        // Preserve best-effort file accounting for the mining admission check.
+        let usage = database_bytes(dir, false).map_err(internal)?;
+        Ok((quota, available_space(quota, usage, volume.available)))
+    }
+
+    fn resource_storage(&self) -> resources::Storage {
+        let config = &self.shared.config;
+        let used = database_bytes(&config.archive_dir, true).ok();
+        let volume = volume_space(&config.archive_dir).ok();
+        resources::Storage {
+            archive_bytes: used,
+            quota_bytes: Some(config.quota_bytes),
+            volume_used_bytes: volume.as_ref().map(|v| v.used),
+            volume_total_bytes: volume.as_ref().map(|v| v.total),
+            writable_bytes: used.zip(volume).map(|(used, volume)| {
+                available_space(config.quota_bytes, used, volume.available)
+                    .saturating_sub(config.reserve_bytes)
+            }),
+            volume_shared: config.mount_id.is_none(),
+        }
     }
 
     fn record_worker(&self, id: &str, slots: u16) -> Api<()> {
@@ -232,7 +242,37 @@ fn now() -> u64 {
         .as_secs()
 }
 
-fn volume_free(path: &Path) -> std::io::Result<u64> {
+fn database_bytes(dir: &Path, strict: bool) -> std::io::Result<u64> {
+    let mut bytes = 0_u64;
+    for db in [
+        "archive.sqlite",
+        "contributions.sqlite",
+        "resource-history.sqlite",
+    ] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            match fs::metadata(dir.join(format!("{db}{suffix}"))) {
+                Ok(info) if info.is_file() => bytes = bytes.saturating_add(info.len()),
+                Err(err) if strict && err.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(err);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+fn available_space(quota: u64, used: u64, mount_available: u64) -> u64 {
+    quota.saturating_sub(used).min(mount_available)
+}
+
+struct VolumeSpace {
+    total: u64,
+    used: u64,
+    available: u64,
+}
+
+fn volume_space(path: &Path) -> std::io::Result<VolumeSpace> {
     let path = CString::new(path.as_os_str().as_bytes())?;
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: path is nul terminated and statvfs writes the complete output on success.
@@ -241,7 +281,12 @@ fn volume_free(path: &Path) -> std::io::Result<u64> {
     }
     // SAFETY: the successful statvfs call initialized stats.
     let stats = unsafe { stats.assume_init() };
-    Ok((stats.f_bavail as u128 * stats.f_frsize as u128).min(u128::from(u64::MAX)) as u64)
+    let bytes = |blocks: u128| (blocks * stats.f_frsize as u128).min(u128::from(u64::MAX)) as u64;
+    Ok(VolumeSpace {
+        total: bytes(stats.f_blocks as u128),
+        used: bytes(stats.f_blocks.saturating_sub(stats.f_bfree) as u128),
+        available: bytes(stats.f_bavail as u128),
+    })
 }
 
 fn verify_mount(path: &Path, identity: &str) -> Result<()> {
@@ -330,6 +375,7 @@ pub async fn serve(config: Config) -> Result<()> {
             worker,
             config,
             storage_fault: AtomicBool::new(false),
+            resources: resources::Monitor::default(),
         }),
         public_db: None,
     };
@@ -342,6 +388,10 @@ pub async fn serve(config: Config) -> Result<()> {
         web_root.clone(),
         contributions.as_ref().map(|(_, state)| state.clone()),
     );
+    let mut background = tokio::task::JoinSet::new();
+    if mining.is_some() {
+        background.spawn(resources::run(app.clone()));
+    }
     let mining_app = app.clone();
     let operator_app = app.clone();
     tokio::try_join!(
@@ -1025,6 +1075,7 @@ mod tests {
                 worker: WORKER.into(),
                 workers: Mutex::new(BTreeMap::new()),
                 storage_fault: AtomicBool::new(false),
+                resources: resources::Monitor::default(),
             }),
             public_db: None,
         }
@@ -1369,6 +1420,29 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "18446744073709551557\n");
+    }
+
+    #[test]
+    fn storage_measurements_include_sidecars_and_respect_quota_and_volume() {
+        let dir = TestDir::new();
+        let app = test_app(&dir, 100_000_000, 1024);
+        let before = app.resource_storage().archive_bytes.unwrap();
+        for name in [
+            "contributions.sqlite",
+            "contributions.sqlite-wal",
+            "resource-history.sqlite",
+            "resource-history.sqlite-journal",
+        ] {
+            fs::write(dir.0.join(name), [0; 120]).unwrap();
+        }
+        fs::write(dir.0.join("unrelated-file"), [0; 120]).unwrap();
+        let sample = app.resource_storage();
+        assert_eq!(sample.archive_bytes, Some(before + 480));
+        let available = app.storage().unwrap().1;
+        assert_eq!(sample.writable_bytes, Some(available.saturating_sub(1024)));
+        assert_eq!(available_space(100, 60, 80), 40);
+        assert_eq!(available_space(100, 60, 25), 25);
+        assert_eq!(available_space(100, 120, 25), 0);
     }
 
     #[tokio::test]

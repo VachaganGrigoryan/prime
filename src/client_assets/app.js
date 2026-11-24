@@ -1,8 +1,8 @@
 'use strict';
 
 const id = (name) => document.getElementById(name);
-const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
-const apiOrigin = local ? location.origin : 'https://prime-api.notallow.cc';
+const sameOrigin = ['localhost', '127.0.0.1', '[::1]', 'prime-dev-api.notallow.cc'].includes(location.hostname);
+const apiOrigin = sameOrigin ? location.origin : 'https://prime-api.notallow.cc';
 const maxInteger = (1n << 64n) - 1n;
 const numberFormat = new Intl.NumberFormat();
 const rateFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });

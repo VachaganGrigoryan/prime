@@ -20,8 +20,8 @@ p, dt, label, details { color: var(--subtle); }
   align-items: center;
   border-bottom: 1px solid var(--line);
   display: flex;
-  gap: 1rem;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .65rem 1.5rem;
   padding: .95rem max(1.25rem, calc((100vw - 72rem) / 2));
 }
 .brand {
@@ -41,7 +41,10 @@ p, dt, label, details { color: var(--subtle); }
   font: 700 .92rem/1 var(--mono);
   padding: .42rem .52rem;
 }
-#connection { font-size: .84rem; text-align: right; }
+.site-nav { display: flex; flex-wrap: wrap; gap: .35rem 1rem; }
+.site-nav a { color: var(--subtle); font-size: .9rem; text-underline-offset: .3em; }
+.site-nav a:hover, .site-nav a[aria-current] { color: var(--accent); }
+#connection { font-size: .84rem; margin-inline-start: auto; }
 main { margin-inline: auto; max-width: 74.5rem; padding: 3.1rem 1.25rem; }
 .overview { border-bottom: 1px solid var(--line); padding-bottom: 2rem; }
 .intro { margin-bottom: 2rem; }
@@ -51,6 +54,33 @@ main { margin-inline: auto; max-width: 74.5rem; padding: 3.1rem 1.25rem; }
   letter-spacing: -.065em;
   line-height: 1.05;
   margin-bottom: .65rem;
+}
+.cta {
+  background: var(--accent);
+  border-radius: .38rem;
+  color: #1a1814;
+  display: inline-block;
+  font-weight: 650;
+  margin-top: 1rem;
+  padding: .55rem .85rem;
+  text-decoration: none;
+}
+.cta:hover { filter: brightness(1.1); }
+.guide { max-width: 52rem; }
+.guide section { border-top: 1px solid var(--line); padding: 1.5rem 0; }
+.guide p + p, .guide p + ul, .guide p + ol, .guide h2 + p, .guide h2 + ol, .guide h3 + p { margin-top: .65rem; }
+.guide li + li { margin-top: .4rem; }
+.guide ol, .guide ul { color: var(--subtle); padding-inline-start: 1.45rem; }
+.guide strong { color: #f3f1eb; }
+.guide a { color: var(--accent); text-underline-offset: .2em; }
+.guide code { font: .88em/1.55 var(--mono); }
+.guide pre {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  overflow-wrap: anywhere;
+  padding: .75rem 1rem;
+  white-space: pre-wrap;
 }
 .metrics { display: grid; gap: 1.25rem; grid-template-columns: 1.6fr 1.2fr 1fr .75fr; }
 .metrics dt, .label { font-size: .82rem; }

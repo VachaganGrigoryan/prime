@@ -5,7 +5,7 @@ pub(super) use access::Access;
 use super::{Api, ApiError, App, PUBLIC_DB_REQUESTS, internal, now, page, secret, summary};
 use axum::{
     Form, Json, Router,
-    extract::{DefaultBodyLimit, Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -16,13 +16,16 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use prime_finder::{
-    archive::{Lease, MiningBenchmark, MiningWorker, Span},
+    archive::{
+        Lease, MiningAdminDeviceDetail, MiningAdminDevices, MiningAdminOverview, MiningBenchmark,
+        MiningWorker, Span,
+    },
     block_codec::{self, BLOCK_WIDTH},
     engine::Engine,
     evidence,
     mining_protocol::{BENCHMARK_COUNT, BENCHMARK_DIGEST, BENCHMARK_VERSION},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -41,6 +44,7 @@ pub(super) struct PublicConfig {
     secret: String,
     hostname: String,
     ui_origin: HeaderValue,
+    serve_dashboard: bool,
     http: reqwest::Client,
 }
 
@@ -69,6 +73,7 @@ impl PublicConfig {
             secret: secret("PRIME_TURNSTILE_SECRET")?,
             hostname,
             ui_origin,
+            serve_dashboard: std::env::var("PRIME_SERVE_DASHBOARD").as_deref() == Ok("1"),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(8))
                 .redirect(reqwest::redirect::Policy::none())
@@ -89,6 +94,7 @@ struct PublicState {
 
 pub(super) fn public_router(mut app: App, config: PublicConfig) -> Router {
     let origin = config.ui_origin.clone();
+    let serve_dashboard = config.serve_dashboard;
     app.public_db = Some(Arc::new(Semaphore::new(PUBLIC_DB_REQUESTS)));
     let reads = Router::new()
         .route("/api/v1/primes", get(page))
@@ -110,7 +116,7 @@ pub(super) fn public_router(mut app: App, config: PublicConfig) -> Router {
             evidence::MAX_BYTES.div_ceil(3) * 4 + 1024,
         ))
         .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             state.clone(),
             admit_submission,
         ));
@@ -124,10 +130,15 @@ pub(super) fn public_router(mut app: App, config: PublicConfig) -> Router {
         .layer(DefaultBodyLimit::max(BOOTSTRAP_LIMIT))
         .with_state(state)
         .merge(submissions);
-    Router::new()
+    let api = Router::new()
         .route("/healthz", get(|| async { "ready" }))
         .merge(reads)
-        .merge(workers.layer(middleware::from_fn(private_response)))
+        .merge(workers.layer(middleware::from_fn(private_response)));
+    if serve_dashboard {
+        api.merge(prime_finder::client_assets::router())
+    } else {
+        api
+    }
 }
 
 async fn admit_submission(
@@ -182,10 +193,13 @@ async fn public_read(State(allowed): State<HeaderValue>, request: Request, next:
     response
 }
 
+fn storage_limited(app: &App) -> bool {
+    app.gap_space(app.shared.config.reserve_bytes.saturating_add(1))
+        .is_err()
+}
+
 async fn progress(State(app): State<App>) -> Api<Json<Value>> {
-    let storage_limited = app
-        .gap_space(app.shared.config.reserve_bytes.saturating_add(1))
-        .is_err();
+    let storage_limited = storage_limited(&app);
     let stats = app.db(|db| Ok(db.mining_status()?)).await?;
     let mut stats = serde_json::to_value(stats).map_err(internal)?;
     if storage_limited && stats["state"] != "exhausted" {
@@ -419,7 +433,9 @@ async fn claim(State(state): State<PublicState>, headers: HeaderMap) -> Api<Json
             if worker.state != "approved" {
                 return Ok(Json(None));
             }
-            storage.gap_space(storage.shared.config.reserve_bytes.saturating_add(1))?;
+            if !db.mining_worker_paused(worker.id)? {
+                storage.gap_space(storage.shared.config.reserve_bytes.saturating_add(1))?;
+            }
             Ok(Json(db.mining_claim(&token)?))
         })
         .await
@@ -552,7 +568,17 @@ async fn submit(
 }
 
 pub(super) fn private_operator_router(app: App) -> Router {
-    admin_api(app).layer(axum::Extension(Actor("private-admin".into())))
+    admin_api(app)
+        .layer(axum::Extension(Actor("private-admin".into())))
+        .layer(middleware::from_fn(private_response))
+}
+
+async fn admin_page() -> Html<&'static str> {
+    Html(include_str!("admin/index.html"))
+}
+
+async fn admin_device_page(Path(_id): Path<i64>) -> Html<&'static str> {
+    admin_page().await
 }
 
 pub(super) fn operator_router(app: App, access: Access) -> Router {
@@ -560,10 +586,8 @@ pub(super) fn operator_router(app: App, access: Access) -> Router {
         .route("/healthz", get(|| async { "ready" }))
         .merge(
             Router::new()
-                .route(
-                    "/",
-                    get(|| async { Html(include_str!("admin/index.html")) }),
-                )
+                .route("/", get(admin_page))
+                .route("/devices/{id}", get(admin_device_page))
                 .route(
                     "/admin.js",
                     get(|| async {
@@ -595,6 +619,13 @@ fn admin_api(app: App) -> Router {
     Router::new()
         .route(&format!("{PREFIX}/progress"), get(progress))
         .route(&format!("{PREFIX}/admin/workers"), get(workers))
+        .route(&format!("{PREFIX}/admin/overview"), get(admin_overview))
+        .route(
+            &format!("{PREFIX}/admin/resources/history"),
+            get(resource_history),
+        )
+        .route(&format!("{PREFIX}/admin/devices"), get(admin_devices))
+        .route(&format!("{PREFIX}/admin/devices/{{id}}"), get(admin_device))
         .route(
             &format!("{PREFIX}/admin/workers/{{id}}/{{action}}"),
             post(decide),
@@ -608,13 +639,78 @@ async fn workers(State(app): State<App>) -> Api<Json<Vec<MiningWorker>>> {
     app.db(|db| Ok(Json(db.mining_workers()?))).await
 }
 
+#[derive(Serialize)]
+struct AdminOverview {
+    #[serde(flatten)]
+    mining: MiningAdminOverview,
+    resources: Option<super::resources::Sample>,
+}
+
+async fn resource_history(State(app): State<App>) -> Api<Json<Value>> {
+    let dir = app.shared.config.archive_dir.clone();
+    let samples = tokio::task::spawn_blocking(move || super::resources::history(&dir))
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+    Ok(Json(json!({"server_time": now(), "samples": samples})))
+}
+
+async fn admin_overview(State(app): State<App>) -> Api<Json<AdminOverview>> {
+    let storage_limited = storage_limited(&app);
+    let mut overview = app.db(|db| Ok(db.mining_admin_overview()?)).await?;
+    if storage_limited && overview.state != "exhausted" {
+        overview.state = "storage-limited".into();
+    }
+    Ok(Json(AdminOverview {
+        mining: overview,
+        resources: app.shared.resources.latest(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct DeviceQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    approval: String,
+    #[serde(default)]
+    work: String,
+    page: Option<u32>,
+}
+
+async fn admin_devices(
+    State(app): State<App>,
+    Query(query): Query<DeviceQuery>,
+) -> Api<Json<MiningAdminDevices>> {
+    app.db(move |db| {
+        Ok(Json(db.mining_admin_devices(
+            query.q.trim(),
+            &query.approval,
+            &query.work,
+            query.page.unwrap_or(1),
+        )?))
+    })
+    .await
+}
+
+async fn admin_device(
+    State(app): State<App>,
+    Path(id): Path<i64>,
+) -> Api<Json<MiningAdminDeviceDetail>> {
+    app.db(move |db| Ok(Json(db.mining_admin_device(id)?)))
+        .await
+}
+
 async fn decide(
     State(app): State<App>,
     axum::Extension(actor): axum::Extension<Actor>,
     Path((id, action)): Path<(i64, String)>,
     _body: Json<Value>,
 ) -> Api<Json<MiningWorker>> {
-    if !matches!(action.as_str(), "approve" | "reject" | "revoke") {
+    if !matches!(
+        action.as_str(),
+        "approve" | "reject" | "pause" | "resume" | "revoke"
+    ) {
         return Err(error(StatusCode::NOT_FOUND, "Unknown worker action"));
     }
     app.db(move |db| Ok(Json(db.mining_decide(id, &action, &actor.0)?)))
@@ -670,20 +766,62 @@ mod tests {
         (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
     }
 
+    fn test_config(serve_dashboard: bool) -> PublicConfig {
+        PublicConfig {
+            site_key: "test".into(),
+            secret: "test".into(),
+            hostname: "localhost".into(),
+            ui_origin: HeaderValue::from_static("https://prime.notallow.cc"),
+            serve_dashboard,
+            http: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dashboard_is_opt_in_on_public_mining_api() {
+        let dir = TestDir::new();
+        let app = test_app(&dir, 1_000_000_000, 1_000_000);
+        for (serve_dashboard, static_status) in
+            [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)]
+        {
+            let router = public_router(app.clone(), test_config(serve_dashboard));
+            for path in [
+                "/",
+                "/research.html",
+                "/docs.html",
+                "/style.css",
+                "/app.js",
+                "/estimates.html",
+                "/estimates.css",
+                "/estimates.js",
+                "/prime-experiment.json",
+                "/prime-prediction.json",
+                "/prime-score.json",
+            ] {
+                let (status, _) = call(&router, "GET", path, "", Value::Null).await;
+                assert_eq!(status, static_status, "{path}");
+            }
+            for path in ["/healthz", "/join", "/api/v1/mining/progress"] {
+                let (status, _) = call(&router, "GET", path, "", Value::Null).await;
+                assert_eq!(status, StatusCode::OK, "{path}");
+            }
+            let (status, _) = call(
+                &router,
+                "GET",
+                "/api/v1/mining/admin/overview",
+                "",
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+    }
+
     #[tokio::test]
     async fn enrollment_approval_exact_submission_replay_and_revocation() {
         let dir = TestDir::new();
         let app = test_app(&dir, 1_000_000_000, 1_000_000);
-        let router = public_router(
-            app.clone(),
-            PublicConfig {
-                site_key: "test".into(),
-                secret: "test".into(),
-                hostname: "localhost".into(),
-                ui_origin: HeaderValue::from_static("https://prime.notallow.cc"),
-                http: reqwest::Client::new(),
-            },
-        );
+        let router = public_router(app.clone(), test_config(false));
         let code = random_secret().unwrap();
         let code_hash = hash(&code);
         app.db(move |db| {
@@ -774,6 +912,80 @@ mod tests {
         let (_, lease) = call(&router, "POST", &claim_url, token, json!({})).await;
         let lease: Lease = serde_json::from_value(lease).unwrap();
         assert_eq!(lease.blocks, [span]);
+        let admin = private_operator_router(app.clone());
+        let overview_url = format!("{PREFIX}/admin/overview");
+        let devices_url = format!("{PREFIX}/admin/devices");
+        let device_url = format!("{devices_url}/{id}");
+        let pause_url = format!("{PREFIX}/admin/workers/{id}/pause");
+        let history_url = format!("{PREFIX}/admin/resources/history");
+        for url in [&overview_url, &devices_url, &device_url, &history_url] {
+            for credential in ["", token] {
+                assert_eq!(
+                    call(&router, "GET", url, credential, Value::Null).await.0,
+                    StatusCode::NOT_FOUND
+                );
+            }
+        }
+        assert_eq!(
+            call(&router, "POST", &pause_url, token, json!({})).await.0,
+            StatusCode::NOT_FOUND
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                call(&admin, "POST", &pause_url, "", json!({})).await.0,
+                StatusCode::OK
+            );
+        }
+        let (status, device) = call(&admin, "GET", &device_url, "", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(device["paused"], true);
+        assert_eq!(device["benchmark_prime_count"], BENCHMARK_COUNT.to_string());
+        assert_eq!(device["assignment"], json!(span));
+        assert!(device["lease_expires_at"].is_i64());
+        assert_eq!(device["decisions"].as_array().unwrap().len(), 2);
+        assert_eq!(device["decisions"][0]["action"], "pause");
+        assert_eq!(device["decisions"][0]["actor"], "private-admin");
+        let (_, page) = call(
+            &admin,
+            "GET",
+            &format!("{devices_url}?q=TEST&approval=approved&work=finishing"),
+            "",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(page["total"], 1);
+        assert_eq!(page["devices"][0]["id"], id);
+        // A failed telemetry database must leave overview and leased block submission usable.
+        std::fs::write(
+            app.shared
+                .config
+                .archive_dir
+                .join("resource-history.sqlite"),
+            b"invalid SQLite file",
+        )
+        .unwrap();
+        assert_eq!(
+            call(&admin, "GET", &history_url, "", Value::Null).await.0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let (_, overview) = call(&admin, "GET", &overview_url, "", Value::Null).await;
+        assert_eq!(overview["paused"], false);
+        assert_eq!(overview["paused_devices"], 1);
+        assert_eq!(overview["active_blocks"], 1);
+        let (_, recovered) = call(&router, "POST", &claim_url, token, json!({})).await;
+        assert_eq!(recovered["token"], lease.token);
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("{PREFIX}/heartbeat"),
+                token,
+                json!({"lease":lease.token}),
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
         let exact = Engine::new(100_000).enumerate(span.lo, span.hi);
         let payload = block_codec::encode(span.lo, span.hi, &exact).unwrap();
         let data = json!({"lease":lease.token,"kind":ORDERED_PRIMES,"count":exact.len(),
@@ -792,6 +1004,23 @@ mod tests {
         .await;
         assert_eq!(progress["verified_through"], span.hi.to_string());
         assert_eq!(progress["verified_primes"], exact.len().to_string());
+        assert_eq!(progress["state"], "waiting");
+        assert_eq!(
+            call(&router, "POST", &claim_url, token, json!({})).await,
+            (StatusCode::OK, Value::Null)
+        );
+        assert_eq!(
+            call(
+                &admin,
+                "POST",
+                &format!("{PREFIX}/admin/workers/{id}/resume"),
+                "",
+                json!({}),
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
 
         let (_, next) = call(&router, "POST", &claim_url, token, json!({})).await;
         app.db(move |db| Ok(db.mining_decide(id, "revoke", "test")?))

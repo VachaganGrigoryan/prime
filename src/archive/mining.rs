@@ -8,6 +8,7 @@ const RATE_SECONDS: i64 = 60;
 const ENROLLMENT_SECONDS: i64 = 600;
 const SOURCE_LIMIT: u32 = 10;
 const ENROLLMENT_LIMIT: u32 = 2048;
+const ADMIN_PAGE_SIZE: i64 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MiningBenchmark {
@@ -46,6 +47,52 @@ pub struct MiningStatus {
     pub active: Vec<Span>,
     pub online_workers: u64,
     pub recent_primes_per_second: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MiningAdminOverview {
+    pub state: String,
+    pub paused: bool,
+    pub verified_through: String,
+    pub verified_primes: String,
+    pub recent_primes_per_second: f64,
+    pub active_blocks: i64,
+    pub server_time: i64,
+    pub total_devices: i64,
+    pub pending_devices: i64,
+    pub online_approved_devices: i64,
+    pub paused_devices: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MiningAdminDevice {
+    #[serde(flatten)]
+    pub worker: MiningWorker,
+    pub benchmark_prime_count: Option<String>,
+    pub paused: bool,
+    pub online: bool,
+    pub lease_expires_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MiningAdminDevices {
+    pub devices: Vec<MiningAdminDevice>,
+    pub total: i64,
+    pub server_time: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MiningAdminDeviceDetail {
+    #[serde(flatten)]
+    pub device: MiningAdminDevice,
+    pub decisions: Vec<MiningDecision>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MiningDecision {
+    pub action: String,
+    pub actor: String,
+    pub decided_at: i64,
 }
 
 #[derive(Debug)]
@@ -118,6 +165,19 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn migrate_admin(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "ALTER TABLE mining_workers ADD COLUMN paused INTEGER NOT NULL DEFAULT 0
+           CHECK(paused IN (0,1) AND (state='approved' OR paused=0));
+         CREATE INDEX IF NOT EXISTS mining_decisions_worker
+           ON mining_decisions(worker_id, decided_at DESC, id DESC);
+         PRAGMA user_version=4;",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub(super) fn require_legacy(db: &Connection) -> Result<()> {
     let started = db.query_row("SELECT started FROM mining_state", [], |row| {
         row.get::<_, bool>(0)
@@ -176,6 +236,15 @@ const WORKER_COLUMNS: &str = "w.id,w.name,w.state,w.last_seen,w.benchmark,w.benc
      w.accepted,w.invalid,w.expired,w.verification_ms,s.lo,s.hi";
 const WORKER_JOIN: &str = "FROM mining_workers w LEFT JOIN segments s ON s.worker=?1||w.id
        AND s.rev IS NULL AND s.expires>?2";
+const ADMIN_DEVICE_FILTER: &str = "
+    WHERE (?3='' OR instr(lower(w.name),lower(?3))>0 OR CAST(w.id AS TEXT)=?3)
+      AND (?4='' OR w.state=?4)
+      AND CASE ?5
+        WHEN '' THEN 1
+        WHEN 'enabled' THEN w.state='approved' AND w.paused=0
+        WHEN 'finishing' THEN w.paused=1 AND s.expires IS NOT NULL
+        WHEN 'paused' THEN w.paused=1 AND s.expires IS NULL
+      END";
 
 fn unsigned(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
     row.get::<_, Option<i64>>(index)?
@@ -218,6 +287,20 @@ fn read_worker(row: &rusqlite::Row<'_>) -> rusqlite::Result<MiningWorker> {
     })
 }
 
+fn read_admin_device(row: &rusqlite::Row<'_>, current: i64) -> rusqlite::Result<MiningAdminDevice> {
+    let worker = read_worker(row)?;
+    Ok(MiningAdminDevice {
+        online: worker.last_seen > current - ONLINE_SECONDS,
+        benchmark_prime_count: worker
+            .benchmark
+            .as_ref()
+            .map(|report| report.count.to_string()),
+        worker,
+        paused: row.get(12)?,
+        lease_expires_at: row.get(13)?,
+    })
+}
+
 fn worker_by_id(db: &Connection, id: i64) -> Result<MiningWorker> {
     db.query_row(
         &format!("SELECT {WORKER_COLUMNS} {WORKER_JOIN} WHERE w.id=?3"),
@@ -226,6 +309,47 @@ fn worker_by_id(db: &Connection, id: i64) -> Result<MiningWorker> {
     )
     .optional()?
     .ok_or(ArchiveError::NotFound)
+}
+
+fn mining_checkpoint(db: &Connection) -> Result<(bool, u64, String)> {
+    Ok(db.query_row(
+        "SELECT paused,verified,count FROM mining_state",
+        [],
+        |row| Ok((row.get(0)?, read_key(row, 1)?, row.get(2)?)),
+    )?)
+}
+
+fn mining_state_label(
+    paused: bool,
+    frontier: u64,
+    has_active: bool,
+    has_eligible: bool,
+) -> &'static str {
+    if frontier == u64::MAX {
+        "exhausted"
+    } else if paused {
+        "paused"
+    } else if !has_active && !has_eligible {
+        "waiting"
+    } else {
+        "running"
+    }
+}
+
+fn verified_rate(db: &Connection, current: i64) -> Result<f64> {
+    let count: f64 = db.query_row(
+        "SELECT COALESCE(sum(CAST(count AS REAL)),0.0) FROM mining_rates WHERE second>?1",
+        [current - RATE_SECONDS],
+        |row| row.get(0),
+    )?;
+    Ok(count / RATE_SECONDS as f64)
+}
+
+fn worker_paused(db: &Connection, id: i64) -> Result<bool> {
+    db.prepare_cached("SELECT paused FROM mining_workers WHERE id=?1")?
+        .query_row([id], |row| row.get(0))
+        .optional()?
+        .ok_or(ArchiveError::NotFound)
 }
 
 fn approved_id(db: &Connection, token_hash: &[u8; 32]) -> Result<i64> {
@@ -508,33 +632,176 @@ impl Archive {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn mining_admin_devices(
+        &self,
+        q: &str,
+        approval: &str,
+        work: &str,
+        page: u32,
+    ) -> Result<MiningAdminDevices> {
+        if page == 0
+            || q.len() > 320
+            || !matches!(
+                approval,
+                "" | "pending" | "approved" | "rejected" | "revoked"
+            )
+            || !matches!(work, "" | "enabled" | "finishing" | "paused")
+        {
+            return Err(invalid("invalid device search or filters"));
+        }
+        let current = now();
+        let q = q.trim();
+        let total = self
+            .db
+            .prepare_cached(&format!(
+                "SELECT count(*) {WORKER_JOIN} {ADMIN_DEVICE_FILTER}"
+            ))?
+            .query_row(params![MINING_PREFIX, current, q, approval, work], |row| {
+                row.get(0)
+            })?;
+        let offset = i64::from(page - 1) * ADMIN_PAGE_SIZE;
+        let mut statement = self.db.prepare_cached(&format!(
+            "SELECT {WORKER_COLUMNS},w.paused,s.expires {WORKER_JOIN} {ADMIN_DEVICE_FILTER}
+             ORDER BY (w.state='pending') DESC,w.id DESC LIMIT ?6 OFFSET ?7"
+        ))?;
+        let devices = statement
+            .query_map(
+                params![
+                    MINING_PREFIX,
+                    current,
+                    q,
+                    approval,
+                    work,
+                    ADMIN_PAGE_SIZE,
+                    offset
+                ],
+                |row| read_admin_device(row, current),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(MiningAdminDevices {
+            devices,
+            total,
+            server_time: current,
+        })
+    }
+
+    pub fn mining_admin_device(&self, id: i64) -> Result<MiningAdminDeviceDetail> {
+        let current = now();
+        let device = self
+            .db
+            .prepare_cached(&format!(
+                "SELECT {WORKER_COLUMNS},w.paused,s.expires {WORKER_JOIN} WHERE w.id=?3"
+            ))?
+            .query_row(params![MINING_PREFIX, current, id], |row| {
+                read_admin_device(row, current)
+            })
+            .optional()?
+            .ok_or(ArchiveError::NotFound)?;
+        let mut statement = self.db.prepare_cached(
+            "SELECT action,actor,decided_at FROM mining_decisions
+             WHERE worker_id=?1 ORDER BY decided_at DESC,id DESC LIMIT 20",
+        )?;
+        let decisions = statement
+            .query_map([id], |row| {
+                Ok(MiningDecision {
+                    action: row.get(0)?,
+                    actor: row.get(1)?,
+                    decided_at: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(MiningAdminDeviceDetail { device, decisions })
+    }
+
+    pub fn mining_worker_paused(&self, id: i64) -> Result<bool> {
+        worker_paused(&self.db, id)
+    }
+
+    pub fn mining_admin_overview(&self) -> Result<MiningAdminOverview> {
+        let current = now();
+        let (paused, frontier, count) = mining_checkpoint(&self.db)?;
+        let active_blocks = self.db.query_row(
+            "SELECT count(*) FROM segments WHERE rev IS NULL AND expires>?1
+             AND substr(worker,1,length(?2))=?2",
+            params![current, MINING_PREFIX],
+            |row| row.get(0),
+        )?;
+        let (total_devices, pending_devices, online_approved_devices, paused_devices, eligible) =
+            self.db.query_row(
+                "SELECT count(*),
+                        count(*) FILTER (WHERE state='pending'),
+                        count(*) FILTER (WHERE state='approved' AND last_seen>?1),
+                        count(*) FILTER (WHERE paused=1),
+                        count(*) FILTER (WHERE state='approved' AND last_seen>?1 AND paused=0)>0
+                 FROM mining_workers",
+                [current - ONLINE_SECONDS],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+        Ok(MiningAdminOverview {
+            state: mining_state_label(paused, frontier, active_blocks != 0, eligible).into(),
+            paused,
+            verified_through: frontier.to_string(),
+            verified_primes: count,
+            recent_primes_per_second: verified_rate(&self.db, current)?,
+            active_blocks,
+            server_time: current,
+            total_devices,
+            pending_devices,
+            online_approved_devices,
+            paused_devices,
+        })
+    }
+
     pub fn mining_decide(&mut self, id: i64, action: &str, actor: &str) -> Result<MiningWorker> {
         if actor.is_empty() || actor.len() > 320 || actor.chars().any(char::is_control) {
             return Err(invalid("invalid administrator identity"));
         }
-        let (required, decision) = match action {
-            "approve" => ("pending", "approved"),
-            "reject" => ("pending", "rejected"),
-            "revoke" => ("approved", "revoked"),
-            _ => return Err(invalid("expected approve, reject, or revoke")),
+        let approval = match action {
+            "approve" => Some(("pending", "approved")),
+            "reject" => Some(("pending", "rejected")),
+            "revoke" => Some(("approved", "revoked")),
+            "pause" | "resume" => None,
+            _ => return Err(invalid("unknown worker action")),
         };
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = worker_by_id(&tx, id)?;
-        if worker.state == decision {
-            return Ok(worker);
+        if let Some((required, decision)) = approval {
+            if worker.state == decision {
+                return Ok(worker);
+            }
+            if worker.state != required {
+                return Err(conflict("worker state does not allow this action"));
+            }
+            if action == "approve" && !worker.benchmark.is_some_and(|benchmark| benchmark.passed) {
+                return Err(conflict("worker needs a passing benchmark"));
+            }
+            tx.execute(
+                "UPDATE mining_workers SET state=?1,paused=0 WHERE id=?2",
+                params![decision, id],
+            )?;
+        } else {
+            if worker.state != "approved" {
+                return Err(conflict("worker approval is required"));
+            }
+            let paused = action == "pause";
+            if worker_paused(&tx, id)? == paused {
+                return Ok(worker);
+            }
+            tx.execute(
+                "UPDATE mining_workers SET paused=?1 WHERE id=?2",
+                params![paused, id],
+            )?;
         }
-        if worker.state != required {
-            return Err(conflict("worker state does not allow this action"));
-        }
-        if action == "approve" && !worker.benchmark.is_some_and(|benchmark| benchmark.passed) {
-            return Err(conflict("worker needs a passing benchmark"));
-        }
-        tx.execute(
-            "UPDATE mining_workers SET state=?1 WHERE id=?2",
-            params![decision, id],
-        )?;
         tx.execute(
             "INSERT INTO mining_decisions(worker_id,action,actor,decided_at) VALUES (?1,?2,?3,?4)",
             params![id, action, actor, now()],
@@ -604,7 +871,7 @@ impl Archive {
             tx.query_row("SELECT paused,verified FROM mining_state", [], |row| {
                 Ok((row.get::<_, bool>(0)?, read_key(row, 1)?))
             })?;
-        let span = if paused {
+        let span = if paused || worker_paused(&tx, id)? {
             None
         } else {
             find_work(&tx, frontier, current)?
@@ -752,17 +1019,7 @@ impl Archive {
 
     pub fn mining_status(&self) -> Result<MiningStatus> {
         let current = now();
-        let (paused, frontier, count) = self.db.query_row(
-            "SELECT paused,verified,count FROM mining_state",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, bool>(0)?,
-                    read_key(row, 1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )?;
+        let (paused, frontier, count) = mining_checkpoint(&self.db)?;
         let active = self
             .db
             .prepare_cached(
@@ -771,25 +1028,13 @@ impl Archive {
             )?
             .query_map(params![current, MINING_PREFIX], |row| read_span(row, 0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let online_workers = self.db.query_row(
-            "SELECT count(*) FROM mining_workers WHERE state='approved' AND last_seen>?1",
+        let (online_workers, eligible) = self.db.query_row(
+            "SELECT count(*),count(*) FILTER (WHERE paused=0)>0
+             FROM mining_workers WHERE state='approved' AND last_seen>?1",
             [current - ONLINE_SECONDS],
-            |row| row.get::<_, u32>(0).map(u64::from),
+            |row| Ok((u64::from(row.get::<_, u32>(0)?), row.get(1)?)),
         )?;
-        let state = if frontier == u64::MAX {
-            "exhausted"
-        } else if paused {
-            "paused"
-        } else if active.is_empty() && online_workers == 0 {
-            "waiting"
-        } else {
-            "running"
-        };
-        let rate: f64 = self.db.query_row(
-            "SELECT COALESCE(sum(CAST(count AS REAL)),0.0) FROM mining_rates WHERE second>?1",
-            [current - RATE_SECONDS],
-            |row| row.get(0),
-        )?;
+        let state = mining_state_label(paused, frontier, !active.is_empty(), eligible);
         let mut latest_primes = Vec::new();
         let mut tail = self.db.prepare_cached(
             "SELECT lo,hi,count FROM segments WHERE lo<=?1 AND rev IS NOT NULL AND count>0
@@ -818,7 +1063,7 @@ impl Archive {
             next_candidates: find_work(&self.db, frontier, current)?,
             active,
             online_workers,
-            recent_primes_per_second: rate / RATE_SECONDS as f64,
+            recent_primes_per_second: verified_rate(&self.db, current)?,
         })
     }
 }
@@ -970,6 +1215,198 @@ mod tests {
         archive.mining_set_paused(false).unwrap();
         let retry = archive.mining_claim(&second).unwrap().unwrap();
         assert_eq!(retry.blocks, second_lease.blocks);
+    }
+
+    #[test]
+    fn device_pause_drains_work_and_resumes_without_changing_approval() {
+        let mut archive = archive();
+        let (first_id, first) = approved(&mut archive, 1);
+        let (second_id, second) = approved(&mut archive, 2);
+        let (pending_id, _) = enroll(&mut archive, 3);
+        assert!(archive.mining_decide(pending_id, "pause", "owner").is_err());
+        assert!(
+            archive
+                .mining_decide(pending_id, "resume", "owner")
+                .is_err()
+        );
+        archive
+            .db
+            .execute(
+                "UPDATE mining_workers SET last_seen=0 WHERE id=?1",
+                [second_id],
+            )
+            .unwrap();
+        archive.mining_set_paused(false).unwrap();
+        let lease = archive.mining_claim(&first).unwrap().unwrap();
+        for action in ["pause", "pause"] {
+            assert_eq!(
+                archive
+                    .mining_decide(first_id, action, "owner")
+                    .unwrap()
+                    .state,
+                "approved"
+            );
+        }
+        let detail = archive.mining_admin_device(first_id).unwrap();
+        assert!(detail.device.paused && detail.device.online);
+        assert_eq!(detail.device.worker.assignment, Some(lease.blocks[0]));
+        assert!(detail.device.lease_expires_at.is_some());
+        assert_eq!(detail.decisions.len(), 2);
+        assert_eq!(detail.decisions[0].action, "pause");
+        assert_eq!(detail.decisions[0].actor, "owner");
+        assert_eq!(
+            archive
+                .mining_admin_devices("", "", "finishing", 1)
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            archive
+                .mining_admin_devices("", "", "paused", 1)
+                .unwrap()
+                .total,
+            0
+        );
+        let overview = archive.mining_admin_overview().unwrap();
+        assert_eq!(overview.state, "running");
+        assert_eq!(overview.active_blocks, 1);
+        assert_eq!(overview.online_approved_devices, 1);
+        assert_eq!(overview.paused_devices, 1);
+        assert_eq!(overview.pending_devices, 1);
+
+        let recovered = archive.mining_claim(&first).unwrap().unwrap();
+        assert_eq!(recovered.token, lease.token);
+        archive.mining_renew(&first, &lease.token).unwrap();
+        commit(&mut archive, &first, &lease).unwrap();
+        assert!(archive.mining_claim(&first).unwrap().is_none());
+        assert_eq!(
+            archive
+                .mining_admin_devices("", "", "paused", 1)
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(archive.mining_status().unwrap().state, "waiting");
+        let overview = archive.mining_admin_overview().unwrap();
+        assert_eq!(overview.state, "waiting");
+        assert_eq!(overview.active_blocks, 0);
+        assert_eq!(overview.online_approved_devices, 1);
+        assert!(overview.recent_primes_per_second > 0.0);
+
+        for action in ["resume", "resume"] {
+            archive.mining_decide(first_id, action, "owner").unwrap();
+        }
+        assert_eq!(
+            archive
+                .mining_admin_device(first_id)
+                .unwrap()
+                .decisions
+                .len(),
+            3
+        );
+        let next = archive.mining_claim(&first).unwrap().unwrap();
+        assert_ne!(next.token, lease.token);
+        archive.mining_decide(first_id, "pause", "owner").unwrap();
+        archive.mining_decide(first_id, "revoke", "owner").unwrap();
+        assert!(archive.mining_renew(&first, &next.token).is_err());
+        assert!(commit(&mut archive, &first, &next).is_err());
+        assert!(archive.mining_decide(first_id, "resume", "owner").is_err());
+        assert_eq!(
+            archive.mining_claim(&second).unwrap().unwrap().blocks,
+            next.blocks
+        );
+        let detail = archive.mining_admin_device(first_id).unwrap();
+        assert_eq!(detail.device.worker.accepted, 1);
+        assert!(!detail.device.paused);
+        assert!(detail.device.worker.assignment.is_none());
+    }
+
+    #[test]
+    fn v3_worker_migration_defaults_to_enabled_and_retains_pause_after_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("prime-mining-v3-{}.sqlite", token().unwrap()));
+        let mut archive = Archive::open(&path).unwrap();
+        let (id, credential) = approved(&mut archive, 1);
+        archive.mining_set_paused(false).unwrap();
+        archive
+            .db
+            .execute_batch(
+                "DROP INDEX mining_decisions_worker;
+                 ALTER TABLE mining_workers DROP COLUMN paused;
+                 PRAGMA user_version=3;",
+            )
+            .unwrap();
+        drop(archive);
+
+        let mut archive = Archive::open(&path).unwrap();
+        let detail = archive.mining_admin_device(id).unwrap();
+        assert!(!detail.device.paused);
+        assert_eq!(detail.device.worker.state, "approved");
+        assert_eq!(detail.decisions[0].action, "approve");
+        assert!(archive.mining_claim(&credential).unwrap().is_some());
+        archive.mining_decide(id, "pause", "owner").unwrap();
+        drop(archive);
+
+        let mut archive = Archive::open(&path).unwrap();
+        assert!(archive.mining_worker_paused(id).unwrap());
+        assert!(archive.mining_claim(&credential).unwrap().is_none());
+        assert_eq!(
+            archive.mining_admin_device(id).unwrap().decisions[0].action,
+            "pause"
+        );
+        drop(archive);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn admin_device_search_filters_and_pages_the_fleet() {
+        let mut archive = archive();
+        let (approved_id, _) = approved(&mut archive, 1);
+        archive
+            .db
+            .execute(
+                "WITH RECURSIVE devices(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM devices WHERE n<51)
+                 INSERT INTO mining_workers(name,token_hash,last_seen)
+                 SELECT 'Atlas-'||n,CAST(printf('%032d',n) AS BLOB),?1 FROM devices",
+                [now()],
+            )
+            .unwrap();
+        let first = archive.mining_admin_devices("", "", "", 1).unwrap();
+        assert_eq!(first.total, 52);
+        assert_eq!(first.devices.len(), 50);
+        assert_eq!(first.devices[0].worker.name, "Atlas-51");
+        let second = archive.mining_admin_devices("", "", "", 2).unwrap();
+        assert_eq!(second.devices[0].worker.name, "Atlas-1");
+        assert_eq!(second.devices[1].worker.id, approved_id);
+        assert_eq!(
+            archive
+                .mining_admin_devices("aTLAs", "pending", "", 1)
+                .unwrap()
+                .total,
+            51
+        );
+        let id = approved_id.to_string();
+        assert_eq!(
+            archive
+                .mining_admin_devices(&id, "approved", "enabled", 1)
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            archive
+                .mining_admin_devices("", "approved", "paused", 1)
+                .unwrap()
+                .total,
+            0
+        );
+        assert!(archive.mining_admin_devices("", "", "", 0).is_err());
+        assert_eq!(archive.mining_admin_overview().unwrap().total_devices, 52);
+        assert!(matches!(
+            archive.mining_admin_device(999),
+            Err(ArchiveError::NotFound)
+        ));
     }
 
     #[test]

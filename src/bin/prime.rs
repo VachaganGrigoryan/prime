@@ -624,32 +624,11 @@ async fn ui_proxy(State(client): State<Client>, OriginalUri(uri): OriginalUri) -
 
 fn ui_router(client: Client) -> Router {
     Router::new()
-        .route(
-            "/",
-            get(|| async { axum::response::Html(include_str!("../client_assets/index.html")) }),
-        )
-        .route(
-            "/style.css",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("../client_assets/style.css"),
-                )
-            }),
-        )
-        .route(
-            "/app.js",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../client_assets/app.js"),
-                )
-            }),
-        )
         .route("/api/v1/mining/progress", get(ui_proxy))
         .route("/api/v1/primes", get(ui_proxy))
         .route("/api/v1/summary", get(ui_proxy))
         .with_state(client)
+        .merge(prime_finder::client_assets::router())
 }
 
 async fn run_ui(client: Client, port: u16) -> Result<()> {
@@ -710,6 +689,14 @@ mod tests {
         let router = ui_router(client);
         for (method, path, status) in [
             ("GET", "/", StatusCode::OK),
+            ("GET", "/research.html", StatusCode::OK),
+            ("GET", "/docs.html", StatusCode::OK),
+            ("GET", "/estimates.html", StatusCode::OK),
+            ("GET", "/estimates.css", StatusCode::OK),
+            ("GET", "/estimates.js", StatusCode::OK),
+            ("GET", "/prime-experiment.json", StatusCode::OK),
+            ("GET", "/prime-prediction.json", StatusCode::OK),
+            ("GET", "/prime-score.json", StatusCode::OK),
             ("GET", "/style.css", StatusCode::OK),
             ("GET", "/app.js", StatusCode::OK),
             ("GET", "/api/v1/mining/admin/workers", StatusCode::NOT_FOUND),

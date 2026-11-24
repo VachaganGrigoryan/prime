@@ -11,7 +11,10 @@ use std::{
 };
 
 mod mining;
-pub use mining::{MiningBenchmark, MiningStatus, MiningSubmission, MiningWorker};
+pub use mining::{
+    MiningAdminDevice, MiningAdminDeviceDetail, MiningAdminDevices, MiningAdminOverview,
+    MiningBenchmark, MiningDecision, MiningStatus, MiningSubmission, MiningWorker,
+};
 
 const BLOCK: u128 = crate::block_codec::BLOCK_WIDTH as u128;
 const LEASE_SECONDS: i64 = 120;
@@ -372,7 +375,7 @@ impl Archive {
                  PRAGMA user_version=1;
                  COMMIT;",
             )?,
-            1..=3 => {}
+            1..=4 => {}
             _ => {
                 return Err(ArchiveError::Corrupt(
                     "unsupported archive schema version".into(),
@@ -386,6 +389,10 @@ impl Archive {
 
         if version < 3 {
             mining::migrate(&mut db)?;
+        }
+
+        if version < 4 {
+            mining::migrate_admin(&mut db)?;
         }
 
         // One coordinator owns the database. Only uncommitted work loses its lease on restart.
@@ -1385,7 +1392,11 @@ mod tests {
             .unwrap();
         archive
             .db
-            .execute_batch("DROP TABLE gap_reports; PRAGMA user_version=1;")
+            .execute_batch(
+                "DROP TABLE gap_reports;
+                 ALTER TABLE mining_workers DROP COLUMN paused;
+                 PRAGMA user_version=1;",
+            )
             .unwrap();
         drop(archive);
 

@@ -10,21 +10,24 @@ mount identity, and the read-only ClusterIP port 8788 used by Test Math.
 | `prime.notallow.cc` | GitHub Pages over the Cloudflare tunnel | Public stats |
 | `prime-api.notallow.cc` | `127.0.0.1:8789` | Public reads, Turnstile enrollment, per-device worker bearer |
 | `prime-admin.notallow.cc` | `127.0.0.1:8792` | Owner-only Cloudflare Access |
-| `prime-dev-api.notallow.cc` | `127.0.0.1:28889` | Isolated staging API and enrollment |
-| `prime-dev-admin.notallow.cc` | `127.0.0.1:28892` | Owner-only staging Access |
+| `prime-dev-api.notallow.cc` | `127.0.0.1:28889` | Dev API and enrollment |
+| `prime-dev-admin.notallow.cc` | `127.0.0.1:28892` | Owner-only dev Access |
 
-The loopback ports 8787 (production) and 28887 (staging) are for private
+The loopback ports 8787 (prod) and 28887 (dev) are for private
 operator access through SSH. The coordinator checks the Access token issuer,
 audience, signature, and lifetime for browser Admin and checks the configured
 origin on Admin writes. Keep public API responses involving enrollment or
 workers out of edge caches.
 
-## Build and stage
+## Build and verify in dev
+
+Atlas runs dev and prod. The dev Kubernetes namespace is `dev-prime-staging`
+and its overlay is `deploy/atlas/staging`.
 
 Build a unique image tag in a clean Atlas build workspace and import it into
-k3s. These commands use the release image tag selected in
-`continuous/workload.patch.yaml`. For iterations, use a fresh tag and update
-that patch before rendering staging.
+k3s. The current deployment tag is pinned in `continuous/workload.patch.yaml`.
+Use a fresh workspace and tag for each build. Update the pinned tag when
+promoting the verified image.
 
 ```sh
 atlas build new prime v020 --mem 3Gi --empty
@@ -34,7 +37,7 @@ atlas build exec prime v020 -- 'cd "$WS/src" && docker build -t prime:0.2.0 -f d
 atlas ssh 'sudo k3s ctr -n k8s.io images import /build/prime/v020/prime-0.2.0.tar'
 ```
 
-Create separate HTTPS staging and production Turnstile widgets restricted to
+Create separate HTTPS dev and prod Turnstile widgets restricted to
 their API hostnames. Create a separate owner-only Cloudflare Access application
 for each Admin hostname before publishing its tunnel route. Set the following
 values in a mode-0600 env file on Atlas for each environment, using the
@@ -46,10 +49,10 @@ environment’s hostname, widget, and Access application audience. Use
 - `PRIME_UI_ORIGIN`, which defaults to `https://prime.notallow.cc`
 
 Use the existing Atlas env-to-secret tool to store each environment’s file as
-`prime-continuous-env` in its namespace. The staging namespace also needs a
+`prime-continuous-env` in its namespace. The dev namespace also needs a
 separate `prime-finder-env` with random `PRIME_ADMIN_TOKEN` and
 `PRIME_WORKER_TOKEN`. Reuse the existing `prime-finder-env` only in production.
-Check the staging and production host ports against existing pod `hostPort`
+Check the dev and prod host ports against existing pod `hostPort`
 settings and host processes before applying either overlay.
 
 ```sh
@@ -64,13 +67,13 @@ atlas publish add prime-dev-api.notallow.cc 28889 --yes
 atlas publish add prime-dev-admin.notallow.cc 28892 --yes
 ```
 
-Check that an unauthenticated browser is sent to Access at the staging Admin
-host and that the owner can sign in. Run two staged workers with separate
+Check that an unauthenticated browser is sent to Access at the dev Admin
+host and that the owner can sign in. Run two dev workers with separate
 enrollments. Verify each appears with its benchmark while pending and that no
 production leases are issued before approval. Approve both, resume mining, and
 verify distinct assignments and exact archive output. Exercise a lease expiry,
 worker revocation, and a coordinator restart. Use the local dashboard against
-the staging API and measure verified primes per second and verification queue
+the dev API and measure verified primes per second and verification queue
 pressure with one worker and with two.
 
 ```sh
@@ -79,9 +82,29 @@ prime --server https://prime-dev-api.notallow.cc ui
 curl -fsS https://prime-dev-api.notallow.cc/api/v1/mining/progress
 ```
 
-To enroll two staging workers on a single Mac, run each worker in a separate
+To enroll two dev workers on a single Mac, run each worker in a separate
 terminal with its own absolute `XDG_STATE_HOME`, for example a directory from
 `mktemp -d`. Each terminal prompts for a separate enrollment code.
+
+The **Prime resources** panel samples the coordinator every five seconds. CPU
+usage of 100% represents one fully occupied core. Resident memory comes from
+the Linux coordinator process. The archive figure totals the sizes of Prime’s
+SQLite files and their sidecars. The volume figure includes every filesystem
+user. On staging this is the shared staging volume. Writable space is limited
+by both the archive quota and filesystem availability, after the reserve.
+
+The coordinator retains the last 1,440 minute buckets in
+`/archive/resource-history.sqlite`. Collection runs while the Admin page is
+closed. Each bucket holds average CPU and the latest memory and storage
+readings for that minute. Gaps mark missing readings. Admin clients can read
+the same history at `GET /api/v1/mining/admin/resources/history`.
+
+In Admin, open a device from the pool to review its benchmark, contact status,
+lease, and operator history. Pause a device with a current assignment and
+verify that it finishes the block and receives no new assignment. Resume it
+with the same credential. Revoke it while it holds another lease and verify
+that the other device can reclaim the range. A rejected or revoked device
+needs a fresh enrollment and passing benchmark before approval.
 
 ## Back up and cut over
 
@@ -164,6 +187,13 @@ If a production issue occurs, pause dispatch in Admin and preserve the new
 database and pre-cutover backup. Rolling back to a pre-Prime image requires
 the compatible pre-cutover snapshot. Keep the newer archive for recovery of
 any work completed after cutover.
+
+For the Admin upgrade from schema 3 to schema 4, pause dispatch and let active
+leases drain. Use the SQLite backup API shown above to copy and verify the
+archive while the coordinator serves requests. Then roll out the new image and
+restore the prior dispatch setting after verification. Use a schema 4-compatible
+recovery build to preserve blocks accepted after the upgrade. The previous
+coordinator rejects schema 4 archives.
 
 The base kustomization and `volunteers` overlay remain available for legacy
 maintenance and isolated benchmarks. Continuous mining and legacy volunteer

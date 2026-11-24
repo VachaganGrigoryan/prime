@@ -3,22 +3,190 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Prime Admin</title>
   <link rel="stylesheet" href="/admin.css">
   <script src="/admin.js" defer></script>
 </head>
 <body>
-  <header><h1>Prime Admin</h1><a href="https://prime.notallow.cc">Public dashboard</a></header>
-  <main>
-    <section aria-labelledby="mining"><h2 id="mining">Continuous mining</h2>
-      <dl id="progress"></dl>
-      <button id="pause" disabled>Pause mining</button>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="/" aria-label="Prime Admin home">
+        <span class="brand-mark" aria-hidden="true">2</span>
+        <span>Prime <span class="brand-context">Admin</span></span>
+      </a>
+      <a class="public-link" href="https://prime.notallow.cc">Public dashboard <span aria-hidden="true">↗</span></a>
+    </div>
+  </header>
+
+  <main id="main" class="shell" tabindex="-1">
+    <div class="refresh-strip">
+      <p class="freshness"><span id="refresh-status">Connecting to Atlas</span> <time id="last-refresh" hidden></time></p>
+      <button type="button" id="retry-refresh" class="button-quiet" hidden>Retry refresh</button>
+    </div>
+    <p id="refresh-error" class="notice error" role="alert" hidden></p>
+    <p id="action-feedback" class="notice" role="status" hidden></p>
+    <noscript><p class="notice error">Enable JavaScript to use Prime Admin.</p></noscript>
+
+    <section id="overview" aria-labelledby="overview-title" hidden>
+      <div class="page-heading">
+        <div>
+          <h1 id="overview-title">Mining overview</h1>
+          <p class="heading-status"><span id="coordinator-status" class="badge">Loading coordinator</span></p>
+        </div>
+        <button type="button" id="global-pause" disabled>Pause mining</button>
+      </div>
+
+      <dl class="metrics">
+        <div class="metric"><dt>Verified through</dt><dd id="verified-through">—</dd></div>
+        <div class="metric"><dt>Confirmed primes</dt><dd id="verified-primes">—</dd></div>
+        <div class="metric"><dt>Verified primes / sec</dt><dd><span id="verified-rate">—</span><small>Last 60 seconds</small></dd></div>
+        <div class="metric"><dt>Active blocks</dt><dd id="active-blocks">—</dd></div>
+      </dl>
+
+      <section class="panel resource-panel" aria-labelledby="resource-title">
+        <div class="resource-heading">
+          <h2 id="resource-title">Prime resources</h2>
+          <p class="muted">Sampled <time id="resource-sampled">—</time></p>
+        </div>
+        <dl class="resource-readings">
+          <div><dt>Coordinator CPU</dt><dd id="resource-cpu">—</dd><dd class="metric-note">100% is one CPU core</dd></div>
+          <div><dt>Resident memory</dt><dd id="resource-memory">—</dd></div>
+          <div><dt>Prime archive</dt><dd id="resource-archive">—</dd><dd id="resource-quota" class="metric-note">—</dd></div>
+          <div><dt id="resource-volume-label">Archive volume usage</dt><dd id="resource-volume">—</dd><dd id="resource-writable" class="metric-note">—</dd></div>
+        </dl>
+        <div class="resource-heading">
+          <h3>Last 24 hours</h3>
+          <span id="resource-span" class="muted"></span>
+        </div>
+        <p id="resource-history-status" class="muted" role="status">Loading minute readings…</p>
+        <div id="resource-history" hidden>
+          <div class="resource-trends">
+            <figure><figcaption>CPU utilization</figcaption><canvas id="trend-cpu" aria-hidden="true"></canvas><p id="trend-cpu-range"></p></figure>
+            <figure><figcaption>Resident memory</figcaption><canvas id="trend-memory" aria-hidden="true"></canvas><p id="trend-memory-range"></p></figure>
+            <figure><figcaption>Prime archive size</figcaption><canvas id="trend-archive" aria-hidden="true"></canvas><p id="trend-archive-range"></p></figure>
+          </div>
+          <label for="resource-minute">Inspect a minute</label>
+          <input type="range" id="resource-minute" min="0" max="1439" value="1439" step="1" aria-describedby="resource-minute-values">
+          <output id="resource-minute-values" for="resource-minute"></output>
+        </div>
+      </section>
+
+      <section class="panel fleet" aria-labelledby="fleet-title">
+        <div class="panel-header fleet-header">
+          <h2 id="fleet-title">Devices</h2>
+          <span id="fleet-total" class="muted"></span>
+        </div>
+        <dl class="fleet-summary">
+          <div><dt>Pending approval</dt><dd id="pending-count" class="amber">—</dd></div>
+          <div><dt>Approved, recently seen</dt><dd id="online-count">—</dd></div>
+          <div><dt>Paused</dt><dd id="paused-count">—</dd></div>
+        </dl>
+        <form id="device-filters" class="filters" role="search" aria-label="Filter devices">
+          <label class="device-search">Find a device
+            <input id="device-search" type="search" maxlength="80" placeholder="Search by name or ID" autocomplete="off">
+          </label>
+          <label>Approval
+            <select id="approval-filter">
+              <option value="">All approvals</option>
+              <option value="pending">Pending</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="revoked">Revoked</option>
+            </select>
+          </label>
+          <label>Work status
+            <select id="work-filter">
+              <option value="">All work statuses</option>
+              <option value="enabled">Enabled</option>
+              <option value="finishing">Finishing current block</option>
+              <option value="paused">Paused</option>
+            </select>
+          </label>
+        </form>
+
+        <p id="device-list-status" class="list-status muted" role="status">Loading devices…</p>
+        <table id="device-table" role="table" hidden>
+          <caption class="visually-hidden">Registered devices</caption>
+          <thead role="rowgroup">
+            <tr role="row">
+              <th scope="col" role="columnheader">Device</th>
+              <th scope="col" role="columnheader">Benchmark</th>
+              <th scope="col" role="columnheader">Approval</th>
+              <th scope="col" role="columnheader">Work status</th>
+              <th scope="col" role="columnheader">Last contact</th>
+              <th scope="col" role="columnheader" class="numeric">Accepted blocks</th>
+            </tr>
+          </thead>
+          <tbody id="device-rows" role="rowgroup"></tbody>
+        </table>
+
+        <nav class="pagination" aria-label="Device pages" hidden>
+          <span id="page-summary" class="muted"></span>
+          <div class="actions">
+            <button id="previous-page" type="button" class="button-quiet" aria-disabled="true">Previous</button>
+            <button id="next-page" type="button" class="button-quiet" aria-disabled="true">Next</button>
+          </div>
+        </nav>
+      </section>
     </section>
-    <section aria-labelledby="workers-heading"><h2 id="workers-heading">Worker pool</h2>
-      <p id="empty" hidden>No workers have enrolled.</p>
-      <div id="workers"></div>
+
+    <section id="device" aria-labelledby="device-title" hidden>
+      <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">← Devices</a></nav>
+      <div class="page-heading">
+        <div>
+          <h1 id="device-title" tabindex="-1">Device details</h1>
+          <div id="device-status" class="heading-status status-group" hidden>
+            <span id="device-approval" class="badge"></span>
+            <span id="device-work" class="badge"></span>
+            <span id="device-contact" class="badge"></span>
+          </div>
+        </div>
+      </div>
+      <p id="detail-status" class="muted" role="status">Loading device…</p>
+
+      <div id="device-content" hidden>
+        <section id="device-controls" class="panel action-panel" aria-labelledby="controls-title">
+          <div>
+            <h2 id="controls-title">Device controls</h2>
+            <p id="controls-description" class="muted"></p>
+          </div>
+          <div id="device-actions" class="actions">
+            <button type="button" data-action="approve" class="button-primary" aria-disabled="true" hidden>Approve</button>
+            <button type="button" data-action="reject" class="button-danger" aria-disabled="true" hidden>Reject</button>
+            <button type="button" data-action="pause" aria-disabled="true" hidden>Pause device</button>
+            <button type="button" data-action="resume" class="button-primary" aria-disabled="true" hidden>Resume device</button>
+            <button type="button" data-action="revoke" class="button-danger" aria-disabled="true" hidden>Revoke access</button>
+          </div>
+        </section>
+
+        <div class="detail-grid">
+          <section class="panel detail-panel" aria-labelledby="identity-title">
+            <h2 id="identity-title">Device information</h2>
+            <dl id="identity-fields" class="detail-fields"></dl>
+          </section>
+          <section class="panel detail-panel" aria-labelledby="benchmark-title">
+            <h2 id="benchmark-title">Benchmark</h2>
+            <dl id="benchmark-fields" class="detail-fields"></dl>
+          </section>
+          <section class="panel detail-panel" aria-labelledby="assignment-title">
+            <h2 id="assignment-title">Current assignment</h2>
+            <dl id="assignment-fields" class="detail-fields"></dl>
+          </section>
+          <section class="panel detail-panel" aria-labelledby="results-title">
+            <h2 id="results-title">Work results</h2>
+            <dl id="result-fields" class="detail-fields"></dl>
+          </section>
+        </div>
+
+        <section class="panel detail-panel audit" aria-labelledby="audit-title">
+          <h2 id="audit-title">Operator history</h2>
+          <p id="audit-empty" class="muted">No operator actions recorded.</p>
+          <ol id="audit-entries" class="audit-list"></ol>
+        </section>
+      </div>
     </section>
-    <output id="feedback" aria-live="polite"></output>
   </main>
 </body>
 </html>
